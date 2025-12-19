@@ -1,0 +1,26 @@
+{
+  "name": "tokenctl",
+  "version": "1.0.0",
+  "description": "Solana token snapshot CLI utility",
+  "main": "bin/tokenctl",
+  "bin": {
+    "tokenctl": "bin/tokenctl"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "solana",
+    "token",
+    "cli"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@solana/web3.js": "^1.95.4",
+    "commander": "^12.1.0",
+    "bs58": "^6.0.0"
+  }
+}
+
+
