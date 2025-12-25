@@ -10,57 +10,57 @@ const watchCommand = require('../src/commands/watch');
 
 program
   .name('tokenctl')
-  .description('Solana token snapshot CLI utility')
+  .description('Fast, deterministic Solana token snapshot CLI utility (v1.1)')
   .version('1.1.0');
 
 program
   .command('rpc')
-  .description('Check RPC endpoint health')
-  .option('--rpc <url>', 'RPC endpoint URL')
+  .description('Test RPC endpoint connection and measure response latency')
+  .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
   .action(rpcCommand);
 
 program
   .command('scan <mint>')
-  .description('Full token snapshot')
-  .option('--rpc <url>', 'RPC endpoint URL')
-  .option('--sig-limit <number>', 'Number of signatures to fetch for activity', '10')
-  .option('--holders', 'Include holder distribution (heavy operation)')
+  .description('Deterministic on-chain token snapshot: metadata, supply, authorities, activity, and risk verdict')
+  .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
+  .option('--sig-limit <number>', 'Number of signatures to fetch for activity analysis', '10')
+  .option('--holders', 'Include holder distribution analysis (heavy operation, off by default)')
   .option('--max-accounts <number>', 'Maximum accounts to scan for holders', '5000')
   .action(scanCommand);
 
 program
   .command('report <mint>')
-  .description('Compact Telegram-friendly report')
-  .option('--rpc <url>', 'RPC endpoint URL')
-  .option('--max-accounts <number>', 'Maximum accounts to scan', '5000')
+  .description('Generate compact, single-block text report for sharing (Telegram/Discord friendly)')
+  .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
+  .option('--max-accounts <number>', 'Maximum accounts to scan for holders', '5000')
   .action(reportCommand);
 
 program
   .command('holders <mint>')
-  .description('Token holder distribution')
-  .option('--rpc <url>', 'RPC endpoint URL')
-  .option('--top <number>', 'Number of top holders to show', '10')
-  .option('--list', 'List top account addresses')
+  .description('Analyze token holder distribution: total holders, concentration, top accounts')
+  .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
+  .option('--top <number>', 'Number of top holders to analyze', '10')
+  .option('--list', 'Display top account addresses with percentages')
   .option('--max-accounts <number>', 'Maximum accounts to scan', '5000')
   .action(holdersCommand);
 
 program
   .command('tx <mint>')
-  .description('Recent transaction activity')
-  .option('--rpc <url>', 'RPC endpoint URL')
-  .option('--limit <number>', 'Number of signatures to fetch', '10')
-  .option('--hours <number>', 'Hours to look back', '24')
-  .option('--accounts <number>', 'Number of largest token accounts to scan', '8')
-  .option('--show <number>', 'Number of events to display', '10')
+  .description('Observe recent on-chain token transfers from top token accounts (not DEX trading data)')
+  .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
+  .option('--limit <number>', 'Maximum signatures to fetch (default: 10, max: 50)', '10')
+  .option('--hours <number>', 'Hours to look back (default: 24)', '24')
+  .option('--accounts <number>', 'Number of largest token accounts to scan (default: 8, max: 20)', '8')
+  .option('--show <number>', 'Number of events to display in output (default: 10)', '10')
   .action(txCommand);
 
 program
   .command('watch <mint>')
-  .description('Live monitoring with alerts')
-  .option('--rpc <url>', 'RPC endpoint URL')
-  .option('--interval <seconds>', 'Polling interval in seconds', '30')
-  .option('--transfer-threshold <number>', 'Large transfer threshold', '1000000')
-  .option('--mint-threshold <number>', 'Mint event threshold', '1000000')
+  .description('Continuously monitor token for authority changes, supply changes, and large transfers')
+  .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
+  .option('--interval <seconds>', 'Polling interval in seconds (default: 30)', '30')
+  .option('--transfer-threshold <number>', 'Alert threshold for large transfers (default: 1000000)', '1000000')
+  .option('--mint-threshold <number>', 'Alert threshold for mint events (default: 1000000)', '1000000')
   .action(watchCommand);
 
 program.parse();
