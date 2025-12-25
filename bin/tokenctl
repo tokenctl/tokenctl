@@ -50,6 +50,8 @@ program
   .option('--rpc <url>', 'RPC endpoint URL')
   .option('--limit <number>', 'Number of signatures to fetch', '10')
   .option('--hours <number>', 'Hours to look back', '24')
+  .option('--accounts <number>', 'Number of largest token accounts to scan', '8')
+  .option('--show <number>', 'Number of events to display', '10')
   .action(txCommand);
 
 program

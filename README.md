@@ -1,6 +1,6 @@
 # tokenctl
 
-A fast, deterministic Solana token snapshot CLI utility. Provides on-chain token analysis without financial advice or audit claims.
+A fast, deterministic Solana token snapshot CLI utility (v1.1). Provides on-chain token analysis without financial advice or audit claims.
 
 ## Installation
 
@@ -88,7 +88,7 @@ Status: OK (245ms)
 tokenctl scan EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
 
 # Full scan with holder distribution (slower)
-tokenctl scan EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --holders
+tokencl scan EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --holders
 
 # Scan with more activity history
 tokenctl scan EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --sig-limit 20
@@ -168,27 +168,68 @@ tokenctl holders EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --max-accounts 100
 
 ### `tokenctl tx <mint>`
 
-**What it does**: Fetches and analyzes recent transaction history for a token. Scans transaction signatures involving the mint address and parses them to identify mint events and transfers.
+**What it does**: Observes recent on-chain token transfers by scanning transaction history from the top token accounts for the mint. Detects SPL token `transfer`, `transferChecked`, `mintTo`, and `mintToChecked` instructions by analyzing balance deltas and parsed instructions from transactions. **This is NOT a DEX trading history** - it shows raw token movements between accounts, complementing tools like Dexscreener which focus on swap activity.
 
 **When to use**:
-- Checking recent token activity
-- Verifying if a token is actively traded
-- Investigating suspicious mint events
-- Reviewing transaction history before making decisions
+- Observing actual token transfers between accounts
+- Verifying token movement activity from top holders
+- Investigating raw token account transfers (not DEX swaps)
+- Understanding token flow patterns from largest accounts
 
 **What it shows**:
-- Observed mint events (new tokens created) with amounts and timestamps
-- Observed transfer events with amounts and timestamps
-- Transaction signatures for verification
-- Note: This is sampled data, not comprehensive - only shows what was observed in the signature history
+- Observed SPL token transfers with amounts, source addresses, destination addresses, timestamps, and transaction signatures
+- Observed mint events with amounts and destination addresses
+- Events are derived from transactions involving the top N token accounts (configurable with `--accounts`)
+- **Important**: This is observed data from a sample of top accounts, not comprehensive. Many transfers may not appear, especially those involving smaller accounts or older transactions that are archived.
+
+**How it works**:
+- Queries the top N largest token accounts using `getTokenLargestAccounts`
+- Collects transaction signatures from those accounts using `getSignaturesForAddress`
+- Fetches and parses transactions to detect transfers via:
+  - Token balance deltas (`preTokenBalances` / `postTokenBalances`)
+  - Parsed SPL token instructions (`transfer`, `transferChecked`, `mintTo`, `mintToChecked`)
+- Deduplicates events to show each transfer once
+
+**Output format**:
+```
+Token
+  Address: <mint>
+  
+Activity
+  [observed - from top N token accounts, last H hours, not comprehensive]
+  
+  2025-12-23 20:50:17Z
+  Type:    Transfer
+  Amount:  2556.277882
+  From:    <full source address>
+  To:      <full destination address>
+  Sig:     <full transaction signature>
+  
+  [additional events...]
+  
+Summary
+  Transfers: X
+  Mint Events: Y
+```
 
 ```bash
-# Recent activity (last 24 hours, 10 signatures)
+# Recent activity (last 24 hours, 10 signatures, top 8 accounts)
 tokenctl tx EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
 
-# More history (48 hours, 20 signatures)
-tokenctl tx EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --limit 20 --hours 48
+# More history (48 hours, 20 signatures, top 12 accounts)
+tokenctl tx EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --limit 20 --hours 48 --accounts 12
+
+# Show more events in output
+tokenctl tx EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --show 20
 ```
+
+**Limitations**:
+- **Not comprehensive**: Only shows transfers observed from top token accounts in the specified time window
+- **Not DEX trading data**: Shows raw token transfers, not swap transactions or trading volume
+- **Archived transactions**: Older transactions may not be available from public RPCs
+- **Large holder tokens**: Tokens with extremely large holder counts (like USDC with 200M+ holders) may fail on public RPCs
+- **RPC dependency**: Requires an RPC endpoint with transaction history support for best results
+- Default limits: `--limit` max 50, `--accounts` max 20
 
 ### `tokenctl watch <mint>`
 
@@ -245,8 +286,10 @@ tokenctl watch EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --transfer-threshold
 - `--max-accounts <number>` - Maximum accounts to scan (default: 5000)
 
 **tx:**
-- `--limit <number>` - Number of signatures to fetch (default: 10)
+- `--limit <number>` - Number of signatures to fetch (default: 10, max: 50)
 - `--hours <number>` - Hours to look back (default: 24)
+- `--accounts <number>` - Number of largest token accounts to scan (default: 8, max: 20)
+- `--show <number>` - Number of events to display (default: 10)
 
 **watch:**
 - `--interval <seconds>` - Polling interval in seconds (default: 30)
@@ -280,8 +323,8 @@ tokenctl report EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
 # Check holder distribution separately
 tokenctl holders EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --top 5
 
-# Recent activity
-tokenctl tx EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --limit 10
+# Recent transfer activity
+tokenctl tx EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --limit 10 --accounts 8
 
 # Live monitoring
 tokenctl watch EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --interval 60
@@ -294,3 +337,4 @@ tokenctl watch EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --interval 60
 - Verdicts are based on on-chain data only, not financial advice
 - Use a reliable RPC endpoint for best performance
 - Holder scanning is intentionally separate to avoid rate limits on public RPCs
+- `tx` command shows raw token transfers, not DEX trading activity - use Dexscreener or similar tools for swap/trading data
