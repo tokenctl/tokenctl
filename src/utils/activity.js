@@ -8,17 +8,92 @@ async function getRecentActivity(connection, mintAddress, limit = 50, hours = 24
   const mintPubkey = new PublicKey(mintAddress);
   const cutoffTime = Date.now() - (hours * 60 * 60 * 1000);
   
-  let signatures;
+  // Get top token accounts to check for activity (like tx command does)
+  // This is more effective than checking the mint address directly
+  let tokenAccounts = [];
   try {
-    signatures = await connection.getSignaturesForAddress(mintPubkey, { limit });
+    const result = await connection.getTokenLargestAccounts(mintPubkey);
+    const accounts = result.value || result || [];
+    // Check top accounts, but limit based on sig-limit to avoid too many RPC calls
+    const maxAccounts = Math.min(5, Math.max(1, Math.floor(limit / 5)));
+    tokenAccounts = accounts.slice(0, maxAccounts);
     if (process.env.DEBUG === '1') {
-      console.error(`DEBUG: getSignaturesForAddress(mint) returned ${signatures.length} signatures`);
+      console.error(`DEBUG: Checking ${tokenAccounts.length} top token accounts for activity (from ${accounts.length} total)`);
     }
   } catch (e) {
-    if (e.message && (e.message.includes('429') || e.message.includes('rate limit'))) {
-      throw new Error('RPC rate limit exceeded. Try again later or use a different RPC endpoint.');
+    if (process.env.DEBUG === '1') {
+      console.error(`DEBUG: Failed to get token accounts, falling back to mint address: ${e.message}`);
     }
-    throw e;
+  }
+  
+  // Collect signatures from token accounts (more effective) and mint address (fallback)
+  const allSignatures = [];
+  
+  // Prioritize token accounts - they show actual trading activity
+  if (tokenAccounts.length > 0) {
+    const sigLimitPerAccount = Math.ceil(limit / tokenAccounts.length);
+    
+    // Get signatures from token accounts
+    for (const account of tokenAccounts) {
+      try {
+        const sigs = await connection.getSignaturesForAddress(
+          new PublicKey(account.address),
+          { limit: sigLimitPerAccount }
+        );
+        // Filter by time and add to collection
+        for (const sig of sigs) {
+          if (sig.blockTime && sig.blockTime * 1000 >= cutoffTime) {
+            allSignatures.push(sig);
+          }
+        }
+        if (tokenAccounts.indexOf(account) < tokenAccounts.length - 1) {
+          await sleep(1000); // Rate limit protection
+        }
+      } catch (e) {
+        if (process.env.DEBUG === '1') {
+          console.error(`DEBUG: Failed to get signatures for account ${account.address}: ${e.message}`);
+        }
+        // Continue with other accounts
+      }
+    }
+  }
+  
+  // Also check mint address (for mint events) - but only if we have room
+  if (allSignatures.length < limit) {
+    try {
+      const remaining = limit - allSignatures.length;
+      const mintSignatures = await connection.getSignaturesForAddress(mintPubkey, { limit: Math.min(5, remaining) });
+      for (const sig of mintSignatures) {
+        if (sig.blockTime && sig.blockTime * 1000 >= cutoffTime) {
+          allSignatures.push(sig);
+        }
+      }
+      if (process.env.DEBUG === '1') {
+        console.error(`DEBUG: getSignaturesForAddress(mint) returned ${mintSignatures.length} signatures`);
+      }
+    } catch (e) {
+      if (process.env.DEBUG === '1') {
+        console.error(`DEBUG: Failed to get signatures from mint address: ${e.message}`);
+      }
+    }
+  }
+  
+  // Deduplicate signatures by signature string
+  const uniqueSignatures = [];
+  const seenSigs = new Set();
+  for (const sig of allSignatures) {
+    if (!seenSigs.has(sig.signature)) {
+      seenSigs.add(sig.signature);
+      uniqueSignatures.push(sig);
+    }
+  }
+  
+  // Sort by blockTime (newest first) and limit
+  uniqueSignatures.sort((a, b) => (b.blockTime || 0) - (a.blockTime || 0));
+  const signatures = uniqueSignatures.slice(0, limit);
+  
+  if (process.env.DEBUG === '1') {
+    console.error(`DEBUG: Total unique signatures collected: ${signatures.length} (from ${tokenAccounts.length} token accounts + mint)`);
   }
 
   const events = [];
@@ -38,37 +113,8 @@ async function getRecentActivity(connection, mintAddress, limit = 50, hours = 24
       await sleep(2000);
     }
 
-    let tx = null;
-    let parseError = null;
-    
-    // Try jsonParsed first, fallback to base64 if it fails
-    try {
-      tx = await connection.getTransaction(sig.signature, {
-        maxSupportedTransactionVersion: 0,
-        encoding: 'jsonParsed'
-      });
-    } catch (e) {
-      // If jsonParsed fails, try base64
-      try {
-        tx = await connection.getTransaction(sig.signature, {
-          maxSupportedTransactionVersion: 0,
-          encoding: 'base64'
-        });
-        // If we got base64, we can't parse it easily, so skip
-        if (tx) {
-          checkedSignatures.push({
-            signature: sig.signature,
-            time: sig.blockTime,
-            status: 'unparseable',
-            error: 'Transaction format not supported',
-            hasEvent: false
-          });
-          continue;
-        }
-      } catch (e2) {
-        parseError = e2.message;
-      }
-    }
+    // Use the same retry logic as tx command
+    const tx = await getTransactionWithRetry(connection, sig.signature);
 
     if (!tx) {
       checkedSignatures.push({
@@ -92,19 +138,20 @@ async function getRecentActivity(connection, mintAddress, limit = 50, hours = 24
       continue;
     }
 
-    if (parseError || !tx.transaction) {
+    if (!tx.transaction) {
       checkedSignatures.push({
         signature: sig.signature,
         time: sig.blockTime,
         status: 'error',
-        error: parseError || 'Invalid transaction',
+        error: 'Invalid transaction',
         hasEvent: false
       });
       continue;
     }
 
-    const parsed = parseTransaction(tx, mintAddress);
-    const hasEvent = parsed.mintEvent || parsed.transfer || parsed.swap;
+    // Use the same parsing logic as tx command (more reliable)
+    const transferEvents = parseTransferEvents(tx, mintAddress);
+    const hasEvent = transferEvents.length > 0;
     
     checkedSignatures.push({
       signature: sig.signature,
@@ -114,33 +161,26 @@ async function getRecentActivity(connection, mintAddress, limit = 50, hours = 24
       hasEvent
     });
 
-      if (parsed.swap) {
-        // DEX swap - this is what users actually want to see
-        swaps++;
-        events.push({
-          signature: sig.signature,
-          time: sig.blockTime,
-          type: 'swap',
-          amount: parsed.swapAmount || parsed.transferAmount,
-          swapType: parsed.swapType
-        });
-      } else if (parsed.mintEvent) {
+    // Count events by type
+    for (const event of transferEvents) {
+      if (event.type === 'mint') {
         mintEvents++;
         events.push({
           signature: sig.signature,
           time: sig.blockTime,
           type: 'mint',
-          amount: parsed.mintAmount
+          amount: event.amount
         });
-      } else if (parsed.transfer) {
+      } else if (event.type === 'transfer') {
         transfers++;
         events.push({
           signature: sig.signature,
           time: sig.blockTime,
           type: 'transfer',
-          amount: parsed.transferAmount
+          amount: event.amount
         });
       }
+    }
   }
 
   if (process.env.DEBUG === '1') {
