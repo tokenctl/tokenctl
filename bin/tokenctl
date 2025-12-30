@@ -10,8 +10,8 @@ const watchCommand = require('../src/commands/watch');
 
 program
   .name('tokenctl')
-  .description('Fast, deterministic Solana token snapshot CLI utility (v1.1)')
-  .version('1.1.0');
+  .description('Fast, deterministic Solana token snapshot CLI utility (v1.1.1)')
+  .version('1.1.1');
 
 program
   .command('rpc')
