@@ -176,22 +176,35 @@ async function getTokenHolders(connection, mintAddress, maxAccounts = 5000) {
     }
   }
   
-  // If getProgramAccounts returned results but we're capped, note it
+  // If getProgramAccounts returned significantly fewer accounts than getTokenLargestAccounts,
+  // it's likely incomplete (rate limited or RPC limitation). Use largestAccounts as better estimate.
+  if (largestAccounts && largestAccounts.length > 0) {
+    if (accounts.length < largestAccounts.length * 0.5) {
+      // getProgramAccounts returned less than 50% of what getTokenLargestAccounts found
+      // This suggests getProgramAccounts is incomplete - use largestAccounts count instead
+      totalHolders = largestAccounts.length;
+      if (process.env.DEBUG === '1') {
+        console.error(`DEBUG: getProgramAccounts incomplete (${accounts.length} vs ${largestAccounts.length} from getTokenLargestAccounts), using largestAccounts count: ${totalHolders}`);
+      }
+    } else if (totalHolders === 0 && accounts.length > 0) {
+      // All accounts have 0 balance (unlikely but possible)
+      if (process.env.DEBUG === '1') {
+        console.error(`DEBUG: Found ${accounts.length} accounts but all have 0 balance`);
+      }
+      // Fallback to largestAccounts count
+      totalHolders = largestAccounts.length;
+    } else if (totalHolders === 0 && accounts.length === 0) {
+      // getProgramAccounts failed completely, use largestAccounts as minimum estimate
+      totalHolders = largestAccounts.length;
+      if (process.env.DEBUG === '1') {
+        console.error(`DEBUG: getProgramAccounts failed, using largestAccounts count as minimum estimate: ${totalHolders}`);
+      }
+    }
+  }
+  
+  // If we hit the maxAccounts limit, mark as partial
   if (partial && totalHolders > 0) {
     // We have a partial count
-  } else if (totalHolders === 0 && accounts.length > 0) {
-    // All accounts have 0 balance (unlikely but possible)
-    if (process.env.DEBUG === '1') {
-      console.error(`DEBUG: Found ${accounts.length} accounts but all have 0 balance`);
-    }
-  } else if (totalHolders === 0 && largestAccounts && largestAccounts.length > 0) {
-    // Fallback: if we can't get program accounts but have largest accounts, 
-    // we know there are at least that many holders
-    // Note: This is a minimum estimate, not the actual total
-    totalHolders = largestAccounts.length;
-    if (process.env.DEBUG === '1') {
-      console.error(`DEBUG: Using largest accounts count as minimum holder estimate: ${totalHolders}`);
-    }
   }
 
   return {
