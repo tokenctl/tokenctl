@@ -80,9 +80,31 @@ function parseMetaplexMetadata(data) {
     const nameBytes = data.slice(offset, offset + nameLen);
     const name = nameBytes.toString('utf8').replace(/\0/g, '').trim();
     
+    // Read symbol length
+    offset += nameLen;
+    if (offset + 4 > data.length) {
+      return { name: name.length > 0 && name.length <= 200 && /^[\x20-\x7E]+$/.test(name) ? name : null, uri: null };
+    }
+    const symbolLen = data.readUInt32LE(offset);
+    offset += 4;
+    
+    // Skip symbol
+    offset += symbolLen;
+    
+    // Read URI length
+    let uri = null;
+    if (offset + 4 <= data.length) {
+      const uriLen = data.readUInt32LE(offset);
+      offset += 4;
+      if (uriLen > 0 && uriLen <= 200 && offset + uriLen <= data.length) {
+        const uriBytes = data.slice(offset, offset + uriLen);
+        uri = uriBytes.toString('utf8').replace(/\0/g, '').trim();
+      }
+    }
+    
     // Validate name is reasonable (not empty, not too long, contains printable chars)
     if (name.length > 0 && name.length <= 200 && /^[\x20-\x7E]+$/.test(name)) {
-      return { name };
+      return { name, uri };
     }
   } catch (e) {
     if (process.env.DEBUG === '1') {
@@ -143,6 +165,51 @@ async function fetchMintInfo(connection, mintAddress) {
         name = parsed.name;
         if (process.env.DEBUG === '1') {
           console.error(`DEBUG: Found token name from Metaplex metadata: ${name}`);
+        }
+      }
+      
+      // If name not found but URI exists, try fetching from URI
+      if (!name && parsed && parsed.uri) {
+        try {
+          // Fetch JSON from URI (with timeout)
+          const https = require('https');
+          const http = require('http');
+          const url = require('url');
+          
+          const uriUrl = parsed.uri.startsWith('http') ? parsed.uri : `https://${parsed.uri}`;
+          const parsedUrl = url.parse(uriUrl);
+          const client = parsedUrl.protocol === 'https:' ? https : http;
+          
+          const jsonData = await new Promise((resolve, reject) => {
+            const req = client.get(uriUrl, { timeout: 5000 }, (res) => {
+              let data = '';
+              res.on('data', chunk => data += chunk);
+              res.on('end', () => {
+                try {
+                  const json = JSON.parse(data);
+                  resolve(json);
+                } catch (e) {
+                  reject(new Error('Invalid JSON'));
+                }
+              });
+            });
+            req.on('error', reject);
+            req.on('timeout', () => {
+              req.destroy();
+              reject(new Error('Timeout'));
+            });
+          });
+          
+          if (jsonData && jsonData.name) {
+            name = jsonData.name;
+            if (process.env.DEBUG === '1') {
+              console.error(`DEBUG: Found token name from metadata URI: ${name}`);
+            }
+          }
+        } catch (e) {
+          if (process.env.DEBUG === '1') {
+            console.error(`DEBUG: Error fetching metadata from URI: ${e.message}`);
+          }
         }
       }
     } else if (process.env.DEBUG === '1') {
