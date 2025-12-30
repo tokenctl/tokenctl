@@ -449,31 +449,47 @@ async function txCommand(mint, options) {
       return;
     }
 
-    // Deduplicate events: same signature, type, amount, destination
+    // Deduplicate events: same signature, type, amount (ignore source/destination differences)
+    // This handles cases where the same transaction produces multiple events with different interpretations
     const eventMap = new Map();
     for (const event of allEvents) {
       const amountStr = typeof event.amount === 'number' 
         ? event.amount.toFixed(6) 
         : String(event.amount);
-      const key = `${event.signature}-${event.type}-${amountStr}-${event.destination}`;
+      // Use signature + type + amount as key (not destination, since same tx can have different dest interpretations)
+      const key = `${event.signature}-${event.type}-${amountStr}`;
       
       if (!eventMap.has(key)) {
         eventMap.set(key, event);
       } else {
-        // Duplicate found - prefer the one with known 'from' address
+        // Duplicate found - prefer the one with known addresses
         const existing = eventMap.get(key);
         if (event.type === 'transfer') {
           const existingFromUnknown = existing.source === 'unknown';
+          const existingToUnknown = existing.destination === 'unknown';
           const currentFromUnknown = event.source === 'unknown';
+          const currentToUnknown = event.destination === 'unknown';
           
-          // Prefer event with known 'from' address
-          if (existingFromUnknown && !currentFromUnknown) {
+          // Prefer event with more known addresses
+          const existingKnownCount = (existingFromUnknown ? 0 : 1) + (existingToUnknown ? 0 : 1);
+          const currentKnownCount = (currentFromUnknown ? 0 : 1) + (currentToUnknown ? 0 : 1);
+          
+          if (currentKnownCount > existingKnownCount) {
+            eventMap.set(key, event);
+          } else if (currentKnownCount === existingKnownCount) {
+            // If same number of known addresses, prefer the one with known 'from'
+            if (existingFromUnknown && !currentFromUnknown) {
+              eventMap.set(key, event);
+            }
+          }
+          // Otherwise keep existing
+        } else {
+          // For mints, prefer the one with known destination
+          const existingToUnknown = existing.destination === 'unknown';
+          const currentToUnknown = event.destination === 'unknown';
+          if (existingToUnknown && !currentToUnknown) {
             eventMap.set(key, event);
           }
-          // If both have unknown 'from', keep the existing one
-        } else {
-          // For mints, keep the existing one (no 'from' field)
-          // (no change needed)
         }
       }
     }
@@ -520,10 +536,53 @@ async function txCommand(mint, options) {
       }
     }
 
+    // Calculate wallet activity patterns
+    const walletStats = new Map();
+    for (const event of uniqueEvents) {
+      if (event.type === 'transfer') {
+        // Track outgoing
+        if (event.source !== 'unknown') {
+          const stats = walletStats.get(event.source) || { sent: 0, received: 0, count: 0 };
+          stats.sent += event.amount;
+          stats.count++;
+          walletStats.set(event.source, stats);
+        }
+        // Track incoming
+        if (event.destination !== 'unknown') {
+          const stats = walletStats.get(event.destination) || { sent: 0, received: 0, count: 0 };
+          stats.received += event.amount;
+          stats.count++;
+          walletStats.set(event.destination, stats);
+        }
+      }
+    }
+    
+    // Find most active wallets
+    const activeWallets = Array.from(walletStats.entries())
+      .map(([address, stats]) => ({
+        address,
+        ...stats,
+        net: stats.received - stats.sent,
+        total: stats.sent + stats.received
+      }))
+      .filter(w => w.count > 1) // Only show wallets with multiple transactions
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5); // Top 5 most active
+    
     console.log('');
     console.log(sectionHeader('Summary'));
     console.log(`  Transfers: ${transferCount}`);
     console.log(`  Mint Events: ${mintCount}`);
+    
+    if (activeWallets.length > 0) {
+      console.log('');
+      console.log('  Most Active Wallets:');
+      for (const wallet of activeWallets) {
+        const netStr = wallet.net >= 0 ? `+${wallet.net.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : wallet.net.toLocaleString('en-US', { maximumFractionDigits: 2 });
+        console.log(`    ${wallet.address}`);
+        console.log(`      Transactions: ${wallet.count} | Net: ${netStr} | Total: ${wallet.total.toLocaleString('en-US', { maximumFractionDigits: 2 })}`);
+      }
+    }
 
   } catch (e) {
     console.error(`Error: ${e.message}`);
