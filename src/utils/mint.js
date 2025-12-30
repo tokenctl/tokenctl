@@ -54,22 +54,40 @@ function sleep(ms) {
 
 function parseMetaplexMetadata(data) {
   try {
+    if (!data || data.length < 70) {
+      return null;
+    }
+    
     // Skip key (1 byte) + update authority (32 bytes) + mint (32 bytes) = 65 bytes
     let offset = 65;
     
-    // DataV2 structure: name (4 bytes len + string) + symbol (4 bytes len + string) + uri (4 bytes len + string)
+    // DataV1 or DataV2 structure: name (4 bytes len + string) + symbol (4 bytes len + string) + uri (4 bytes len + string)
     // Then skip seller_fee_basis_points (2) + creators (optional)
     
-    // Read name
+    // Read name length (4 bytes, little-endian)
+    if (offset + 4 > data.length) {
+      return null;
+    }
     const nameLen = data.readUInt32LE(offset);
     offset += 4;
-    if (nameLen > 0 && offset + nameLen <= data.length) {
-      const nameBytes = data.slice(offset, offset + nameLen);
-      const name = nameBytes.toString('utf8').replace(/\0/g, '').trim();
+    
+    // Validate name length
+    if (nameLen === 0 || nameLen > 1000 || offset + nameLen > data.length) {
+      return null;
+    }
+    
+    // Read name string
+    const nameBytes = data.slice(offset, offset + nameLen);
+    const name = nameBytes.toString('utf8').replace(/\0/g, '').trim();
+    
+    // Validate name is reasonable (not empty, not too long, contains printable chars)
+    if (name.length > 0 && name.length <= 200 && /^[\x20-\x7E]+$/.test(name)) {
       return { name };
     }
   } catch (e) {
-    // Parse error
+    if (process.env.DEBUG === '1') {
+      console.error(`DEBUG: Error parsing Metaplex metadata: ${e.message}`);
+    }
   }
   return null;
 }
@@ -118,13 +136,22 @@ async function fetchMintInfo(connection, mintAddress) {
   // Try Metaplex Token Metadata PDA first
   try {
     const metadataInfo = await connection.getAccountInfo(metadataPDA);
+    await sleep(200); // Small delay to avoid rate limits
     if (metadataInfo && metadataInfo.data) {
       const parsed = parseMetaplexMetadata(metadataInfo.data);
       if (parsed && parsed.name) {
         name = parsed.name;
+        if (process.env.DEBUG === '1') {
+          console.error(`DEBUG: Found token name from Metaplex metadata: ${name}`);
+        }
       }
+    } else if (process.env.DEBUG === '1') {
+      console.error(`DEBUG: Metadata account not found at ${metadataPDA.toString()}`);
     }
   } catch (e) {
+    if (process.env.DEBUG === '1') {
+      console.error(`DEBUG: Error fetching metadata: ${e.message}`);
+    }
     // Continue to next method
   }
   
@@ -133,7 +160,14 @@ async function fetchMintInfo(connection, mintAddress) {
     const parsed = parseToken2022Metadata(accountInfo.data);
     if (parsed && parsed.name) {
       name = parsed.name;
+      if (process.env.DEBUG === '1') {
+        console.error(`DEBUG: Found token name from Token 2022 extension: ${name}`);
+      }
     }
+  }
+  
+  if (!name && process.env.DEBUG === '1') {
+    console.error(`DEBUG: No token name found for mint ${mintAddress}`);
   }
 
   // Use uiAmountString for accurate supply (avoids floating point precision issues)
