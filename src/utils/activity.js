@@ -5,103 +5,112 @@ function sleep(ms) {
 }
 
 async function getRecentActivity(connection, mintAddress, limit = 50, hours = 24) {
-  const mintPubkey = new PublicKey(mintAddress);
-  const cutoffTime = Date.now() - (hours * 60 * 60 * 1000);
+  // Declare variables outside try block so they're accessible in catch
+  let events = [];
+  let mintEvents = 0;
+  let transfers = 0;
+  let swaps = 0;
+  let checkedSignatures = [];
+  let signatures = [];
   
-  // Get top token accounts to check for activity (like tx command does)
-  // This is more effective than checking the mint address directly
-  let tokenAccounts = [];
   try {
-    const result = await connection.getTokenLargestAccounts(mintPubkey);
-    const accounts = result.value || result || [];
-    // Check top accounts, but limit based on sig-limit to avoid too many RPC calls
-    const maxAccounts = Math.min(5, Math.max(1, Math.floor(limit / 5)));
-    tokenAccounts = accounts.slice(0, maxAccounts);
-    if (process.env.DEBUG === '1') {
-      console.error(`DEBUG: Checking ${tokenAccounts.length} top token accounts for activity (from ${accounts.length} total)`);
-    }
-  } catch (e) {
-    if (process.env.DEBUG === '1') {
-      console.error(`DEBUG: Failed to get token accounts, falling back to mint address: ${e.message}`);
-    }
-  }
-  
-  // Collect signatures from token accounts (more effective) and mint address (fallback)
-  const allSignatures = [];
-  
-  // Prioritize token accounts - they show actual trading activity
-  if (tokenAccounts.length > 0) {
-    const sigLimitPerAccount = Math.ceil(limit / tokenAccounts.length);
+    const mintPubkey = new PublicKey(mintAddress);
+    const cutoffTime = Date.now() - (hours * 60 * 60 * 1000);
     
-    // Get signatures from token accounts
-    for (const account of tokenAccounts) {
+    // Get top token accounts to check for activity (like tx command does)
+    // This is more effective than checking the mint address directly
+    let tokenAccounts = [];
+    try {
+      const result = await connection.getTokenLargestAccounts(mintPubkey);
+      const accounts = result.value || result || [];
+      // Check top accounts, but limit based on sig-limit to avoid too many RPC calls
+      const maxAccounts = Math.min(5, Math.max(1, Math.floor(limit / 5)));
+      tokenAccounts = accounts.slice(0, maxAccounts);
+      if (process.env.DEBUG === '1') {
+        console.error(`DEBUG: Checking ${tokenAccounts.length} top token accounts for activity (from ${accounts.length} total)`);
+      }
+    } catch (e) {
+      if (process.env.DEBUG === '1') {
+        console.error(`DEBUG: Failed to get token accounts, falling back to mint address: ${e.message}`);
+      }
+    }
+    
+    // Collect signatures from token accounts (more effective) and mint address (fallback)
+    const allSignatures = [];
+    
+    // Prioritize token accounts - they show actual trading activity
+    if (tokenAccounts.length > 0) {
+      const sigLimitPerAccount = Math.ceil(limit / tokenAccounts.length);
+      
+      // Get signatures from token accounts
+      for (const account of tokenAccounts) {
+        try {
+          const sigs = await connection.getSignaturesForAddress(
+            new PublicKey(account.address),
+            { limit: sigLimitPerAccount }
+          );
+          // Filter by time and add to collection
+          for (const sig of sigs) {
+            if (sig.blockTime && sig.blockTime * 1000 >= cutoffTime) {
+              allSignatures.push(sig);
+            }
+          }
+          if (tokenAccounts.indexOf(account) < tokenAccounts.length - 1) {
+            await sleep(1000); // Rate limit protection
+          }
+        } catch (e) {
+          if (process.env.DEBUG === '1') {
+            console.error(`DEBUG: Failed to get signatures for account ${account.address}: ${e.message}`);
+          }
+          // Continue with other accounts
+        }
+      }
+    }
+    
+    // Also check mint address (for mint events) - but only if we have room
+    if (allSignatures.length < limit) {
       try {
-        const sigs = await connection.getSignaturesForAddress(
-          new PublicKey(account.address),
-          { limit: sigLimitPerAccount }
-        );
-        // Filter by time and add to collection
-        for (const sig of sigs) {
+        const remaining = limit - allSignatures.length;
+        const mintSignatures = await connection.getSignaturesForAddress(mintPubkey, { limit: Math.min(5, remaining) });
+        for (const sig of mintSignatures) {
           if (sig.blockTime && sig.blockTime * 1000 >= cutoffTime) {
             allSignatures.push(sig);
           }
         }
-        if (tokenAccounts.indexOf(account) < tokenAccounts.length - 1) {
-          await sleep(1000); // Rate limit protection
+        if (process.env.DEBUG === '1') {
+          console.error(`DEBUG: getSignaturesForAddress(mint) returned ${mintSignatures.length} signatures`);
         }
       } catch (e) {
         if (process.env.DEBUG === '1') {
-          console.error(`DEBUG: Failed to get signatures for account ${account.address}: ${e.message}`);
-        }
-        // Continue with other accounts
-      }
-    }
-  }
-  
-  // Also check mint address (for mint events) - but only if we have room
-  if (allSignatures.length < limit) {
-    try {
-      const remaining = limit - allSignatures.length;
-      const mintSignatures = await connection.getSignaturesForAddress(mintPubkey, { limit: Math.min(5, remaining) });
-      for (const sig of mintSignatures) {
-        if (sig.blockTime && sig.blockTime * 1000 >= cutoffTime) {
-          allSignatures.push(sig);
+          console.error(`DEBUG: Failed to get signatures from mint address: ${e.message}`);
         }
       }
-      if (process.env.DEBUG === '1') {
-        console.error(`DEBUG: getSignaturesForAddress(mint) returned ${mintSignatures.length} signatures`);
-      }
-    } catch (e) {
-      if (process.env.DEBUG === '1') {
-        console.error(`DEBUG: Failed to get signatures from mint address: ${e.message}`);
+    }
+    
+    // Deduplicate signatures by signature string
+    const uniqueSignatures = [];
+    const seenSigs = new Set();
+    for (const sig of allSignatures) {
+      if (!seenSigs.has(sig.signature)) {
+        seenSigs.add(sig.signature);
+        uniqueSignatures.push(sig);
       }
     }
-  }
-  
-  // Deduplicate signatures by signature string
-  const uniqueSignatures = [];
-  const seenSigs = new Set();
-  for (const sig of allSignatures) {
-    if (!seenSigs.has(sig.signature)) {
-      seenSigs.add(sig.signature);
-      uniqueSignatures.push(sig);
+    
+    // Sort by blockTime (newest first) and limit
+    uniqueSignatures.sort((a, b) => (b.blockTime || 0) - (a.blockTime || 0));
+    signatures = uniqueSignatures.slice(0, limit);
+    
+    if (process.env.DEBUG === '1') {
+      console.error(`DEBUG: Total unique signatures collected: ${signatures.length} (from ${tokenAccounts.length} token accounts + mint)`);
     }
-  }
-  
-  // Sort by blockTime (newest first) and limit
-  uniqueSignatures.sort((a, b) => (b.blockTime || 0) - (a.blockTime || 0));
-  const signatures = uniqueSignatures.slice(0, limit);
-  
-  if (process.env.DEBUG === '1') {
-    console.error(`DEBUG: Total unique signatures collected: ${signatures.length} (from ${tokenAccounts.length} token accounts + mint)`);
-  }
 
-  const events = [];
-  let mintEvents = 0;
-  let transfers = 0;
-  let swaps = 0;
-  const checkedSignatures = [];
-  const maxTxs = Math.min(limit, signatures.length);
+    events = [];
+    mintEvents = 0;
+    transfers = 0;
+    swaps = 0;
+    checkedSignatures = [];
+    const maxTxs = Math.min(limit, signatures.length);
 
   for (let i = 0; i < signatures.length && i < maxTxs; i++) {
     const sig = signatures[i];
@@ -183,27 +192,72 @@ async function getRecentActivity(connection, mintAddress, limit = 50, hours = 24
     }
   }
 
-  if (process.env.DEBUG === '1') {
-    console.error(`DEBUG: Activity summary - signatures found: ${signatures.length}, checked: ${checkedSignatures.length}, mintEvents: ${mintEvents}, transfers: ${transfers}, swaps: ${swaps}`);
-    if (signatures.length > 0 && mintEvents === 0 && transfers === 0 && swaps === 0) {
-      console.error(`DEBUG: WARNING: Found ${signatures.length} signatures but no activity detected. This may be because:`);
-      console.error(`DEBUG:   1. DEX trades don't involve the mint address directly (they use token accounts)`);
-      console.error(`DEBUG:   2. Transactions may be archived or unparseable`);
-      console.error(`DEBUG:   3. Use 'tokenctl tx <mint>' to see transfers from token accounts`);
+    if (process.env.DEBUG === '1') {
+      console.error(`DEBUG: Activity summary - signatures found: ${signatures.length}, checked: ${checkedSignatures.length}, mintEvents: ${mintEvents}, transfers: ${transfers}, swaps: ${swaps}`);
+      if (signatures.length > 0 && mintEvents === 0 && transfers === 0 && swaps === 0) {
+        console.error(`DEBUG: WARNING: Found ${signatures.length} signatures but no activity detected. This may be because:`);
+        console.error(`DEBUG:   1. DEX trades don't involve the mint address directly (they use token accounts)`);
+        console.error(`DEBUG:   2. Transactions may be archived or unparseable`);
+        console.error(`DEBUG:   3. Use 'tokenctl tx <mint>' to see transfers from token accounts`);
+      }
     }
-  }
 
-  return {
-    events,
-    mintEvents,
-    transfers,
-    swaps,
-    signaturesFound: signatures.length,
-    signaturesChecked: checkedSignatures.length,
-    checkedSignatures,
-    allSignatures: signatures, // Keep original signatures for display
-    observed: true
-  };
+    return {
+      events,
+      mintEvents,
+      transfers,
+      swaps,
+      signaturesFound: signatures.length,
+      signaturesChecked: checkedSignatures.length,
+      checkedSignatures,
+      allSignatures: signatures, // Keep original signatures for display
+      observed: true
+    };
+  } catch (e) {
+    // If we hit rate limits or other errors, return partial results instead of throwing
+    const errorMsg = e.message || String(e);
+    const isRateLimit = errorMsg.includes('429') || 
+                       errorMsg.includes('rate limit') ||
+                       errorMsg.includes('timeout') ||
+                       errorMsg.includes('timed out');
+    
+    if (process.env.DEBUG === '1') {
+      console.error(`DEBUG: getRecentActivity error: ${errorMsg}`);
+    }
+    
+    // Return partial results if we have any
+    if (events.length > 0 || signatures.length > 0) {
+      return {
+        events,
+        mintEvents,
+        transfers,
+        swaps: 0,
+        signaturesFound: signatures.length,
+        signaturesChecked: checkedSignatures.length,
+        checkedSignatures,
+        allSignatures: signatures,
+        observed: true
+      };
+    }
+    
+    // If we have no results and it's a rate limit, throw so rpcRetry can handle it
+    if (isRateLimit) {
+      throw e;
+    }
+    
+    // For other errors, return empty results
+    return {
+      events: [],
+      mintEvents: 0,
+      transfers: 0,
+      swaps: 0,
+      signaturesFound: 0,
+      signaturesChecked: 0,
+      checkedSignatures: [],
+      allSignatures: [],
+      observed: false
+    };
+  }
 }
 
 // DEX Program IDs
