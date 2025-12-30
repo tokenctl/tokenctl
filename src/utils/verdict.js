@@ -7,7 +7,9 @@ function calculateVerdict(mintInfo, concentration, activity, holdersData) {
   const authoritiesRevoked = !mintAuthority && !freezeAuthority;
   const noMintActivity = mintEvents === 0;
   const highTop1Concentration = top1 > 50;
-  const highTop10Concentration = top10 > 90;
+  const veryHighTop10Concentration = top10 > 90;
+  const highTop10Concentration = top10 > 60; // Flag when top 10 holds > 60%
+  const moderateTop10Concentration = top10 > 50; // Flag when top 10 holds > 50%
   const hasAuthority = !!mintAuthority || !!freezeAuthority;
   
   // Red flags for scam patterns
@@ -32,10 +34,14 @@ function calculateVerdict(mintInfo, concentration, activity, holdersData) {
   }
 
   // RISKY: Active mint authority with high concentration or recent mints
-  if (mintAuthority && (highTop1Concentration || mintEvents > 0)) {
+  if (mintAuthority && (highTop1Concentration || highTop10Concentration || mintEvents > 0)) {
+    const riskReasons = [];
+    if (highTop1Concentration) riskReasons.push('high top holder concentration');
+    if (highTop10Concentration) riskReasons.push(`high top 10 holder concentration (${top10.toFixed(2)}%)`);
+    if (mintEvents > 0) riskReasons.push('observed mint events');
     return {
       verdict: 'RISKY',
-      reason: `Mint authority exists${highTop1Concentration ? ' with high top holder concentration' : ''}${mintEvents > 0 ? ' and observed mint events' : ''}`
+      reason: `Mint authority exists${riskReasons.length > 0 ? ' with ' + riskReasons.join(' and ') : ''}`
     };
   }
 
@@ -48,10 +54,19 @@ function calculateVerdict(mintInfo, concentration, activity, holdersData) {
   }
 
   // WATCH: Authorities exist or high concentration
-  if (hasAuthority || highTop10Concentration || lowHolders) {
+  if (hasAuthority || moderateTop10Concentration || lowHolders) {
     const reasons = [];
     if (hasAuthority) reasons.push('Authority exists');
-    if (highTop10Concentration) reasons.push('high top 10 holder concentration');
+    if (moderateTop10Concentration) {
+      // Be specific about concentration level
+      if (veryHighTop10Concentration) {
+        reasons.push(`very high top 10 holder concentration (${top10.toFixed(2)}%)`);
+      } else if (highTop10Concentration) {
+        reasons.push(`high top 10 holder concentration (${top10.toFixed(2)}%)`);
+      } else {
+        reasons.push(`moderate top 10 holder concentration (${top10.toFixed(2)}%)`);
+      }
+    }
     if (lowHolders) reasons.push(`low holder count (${totalHolders})`);
     return {
       verdict: 'WATCH',
