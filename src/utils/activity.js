@@ -11,6 +11,9 @@ async function getRecentActivity(connection, mintAddress, limit = 50, hours = 24
   let signatures;
   try {
     signatures = await connection.getSignaturesForAddress(mintPubkey, { limit });
+    if (process.env.DEBUG === '1') {
+      console.error(`DEBUG: getSignaturesForAddress(mint) returned ${signatures.length} signatures`);
+    }
   } catch (e) {
     if (e.message && (e.message.includes('429') || e.message.includes('rate limit'))) {
       throw new Error('RPC rate limit exceeded. Try again later or use a different RPC endpoint.');
@@ -138,6 +141,16 @@ async function getRecentActivity(connection, mintAddress, limit = 50, hours = 24
           amount: parsed.transferAmount
         });
       }
+  }
+
+  if (process.env.DEBUG === '1') {
+    console.error(`DEBUG: Activity summary - signatures found: ${signatures.length}, checked: ${checkedSignatures.length}, mintEvents: ${mintEvents}, transfers: ${transfers}, swaps: ${swaps}`);
+    if (signatures.length > 0 && mintEvents === 0 && transfers === 0 && swaps === 0) {
+      console.error(`DEBUG: WARNING: Found ${signatures.length} signatures but no activity detected. This may be because:`);
+      console.error(`DEBUG:   1. DEX trades don't involve the mint address directly (they use token accounts)`);
+      console.error(`DEBUG:   2. Transactions may be archived or unparseable`);
+      console.error(`DEBUG:   3. Use 'tokenctl tx <mint>' to see transfers from token accounts`);
+    }
   }
 
   return {
