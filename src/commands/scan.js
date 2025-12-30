@@ -65,9 +65,7 @@ async function scanCommand(mint, options) {
 
     console.log(sectionHeader('Token'));
     console.log(`  Address: ${mintInfo.address}`);
-    if (mintInfo.name) {
-      console.log(`  Name: ${mintInfo.name}`);
-    }
+    console.log(`  Name: ${mintInfo.name || 'N/A'}`);
     // Format supply accurately from raw amount - show both formatted and raw for verification
     let supplyFormatted;
     let supplyRawDisplay = '';
