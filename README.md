@@ -119,6 +119,31 @@ Verdict
   Mint and freeze authorities revoked with no observed mint activity in 24h
 ```
 
+**Understanding Verdicts**:
+
+The `scan` command provides a risk classification based on on-chain data:
+
+- **CLEAN** (Green): Lowest risk indicators
+  - Mint and freeze authorities are revoked (cannot mint new tokens or freeze accounts)
+  - No observed mint activity in the last 24 hours
+  - Reasonable holder distribution (not extremely concentrated)
+  - **Note**: This does not guarantee safety, only that basic on-chain indicators are positive
+
+- **WATCH** (Yellow): Requires monitoring
+  - Active mint or freeze authority exists (can mint new tokens or freeze accounts)
+  - High top 10 holder concentration (>90%)
+  - Low holder count (<100 holders)
+  - Other factors that warrant caution
+  - **Note**: Many legitimate tokens may have active authorities during initial distribution
+
+- **RISKY** (Red): High risk indicators
+  - Very few holders (<10) with high concentration (top 10 >30% or top 1 >15%) - classic scam pattern
+  - Low holder count (<100) with very high concentration (top 10 >30% with <50 holders, or top 10 >50% with <100 holders)
+  - Active mint authority with high top holder concentration (>50%) or recent mint events
+  - **Warning**: These patterns are commonly associated with rug pulls and scams
+
+**Important**: Verdicts are based solely on on-chain data analysis and are not financial advice. Always conduct your own research and due diligence.
+
 ### `tokenctl report <mint>`
 
 **What it does**: Generates a compact, single-block text report with all key token information. Designed for easy copy-paste into Telegram, Discord, or other chat platforms.
