@@ -233,6 +233,50 @@ async function fetchMintInfo(connection, mintAddress) {
     }
   }
   
+  // Last resort: Try Dexscreener API (if available)
+  if (!name) {
+    try {
+      const https = require('https');
+      const dexUrl = `https://api.dexscreener.com/latest/dex/tokens/${mintAddress}`;
+      
+      const jsonData = await new Promise((resolve, reject) => {
+        const req = https.get(dexUrl, { timeout: 5000 }, (res) => {
+          let data = '';
+          res.on('data', chunk => data += chunk);
+          res.on('end', () => {
+            try {
+              const json = JSON.parse(data);
+              resolve(json);
+            } catch (e) {
+              reject(new Error('Invalid JSON'));
+            }
+          });
+        });
+        req.on('error', reject);
+        req.on('timeout', () => {
+          req.destroy();
+          reject(new Error('Timeout'));
+        });
+      });
+      
+      // Dexscreener returns { pairs: [...] } - check first pair for token name
+      if (jsonData && jsonData.pairs && jsonData.pairs.length > 0) {
+        const pair = jsonData.pairs[0];
+        if (pair.baseToken && pair.baseToken.name) {
+          name = pair.baseToken.name;
+          if (process.env.DEBUG === '1') {
+            console.error(`DEBUG: Found token name from Dexscreener API: ${name}`);
+          }
+        }
+      }
+    } catch (e) {
+      if (process.env.DEBUG === '1') {
+        console.error(`DEBUG: Error fetching from Dexscreener API: ${e.message}`);
+      }
+      // Silently fail - this is a fallback
+    }
+  }
+  
   if (!name && process.env.DEBUG === '1') {
     console.error(`DEBUG: No token name found for mint ${mintAddress}`);
   }
