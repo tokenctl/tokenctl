@@ -62,3 +62,5 @@ No migration required. This is a drop-in update with improved functionality.
 - For DEX trading data, use specialized tools like Dexscreener
 - Increase `--hours` or `--accounts` flags if you need to see more activity
 
+
+

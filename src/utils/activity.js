@@ -23,7 +23,8 @@ async function getRecentActivity(connection, mintAddress, limit = 50, hours = 24
     try {
       const result = await connection.getTokenLargestAccounts(mintPubkey);
       const accounts = result.value || result || [];
-      // Check top accounts, but limit based on sig-limit to avoid too many RPC calls
+      // Check more accounts when sig-limit is higher
+      // Default (10): 2 accounts, --sig-limit 20: 4 accounts, --sig-limit 50: 5 accounts
       const maxAccounts = Math.min(5, Math.max(1, Math.floor(limit / 5)));
       tokenAccounts = accounts.slice(0, maxAccounts);
       if (process.env.DEBUG === '1') {

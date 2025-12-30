@@ -2,6 +2,14 @@ const { getRpcUrl, createConnection, validateMint, rpcRetry, sleep } = require('
 const { fetchMintInfo } = require('../utils/mint');
 const { PublicKey } = require('@solana/web3.js');
 const { sectionHeader } = require('../utils/colors');
+const {
+  computeWalletStats,
+  classifyWalletRoles,
+  determinePattern,
+  calculateSignalStrength,
+  generateStory,
+  detectDEXPrograms
+} = require('../utils/tx-analytics');
 
 function formatTime(timestamp) {
   if (!timestamp) return 'unknown';
@@ -397,6 +405,7 @@ async function txCommand(mint, options) {
     // Fetch and parse transactions sequentially
     process.stderr.write('Parsing transactions...\r');
     const allEvents = [];
+    const allTransactions = []; // Store for DEX program detection
     let transferCount = 0;
     let mintCount = 0;
 
@@ -406,6 +415,9 @@ async function txCommand(mint, options) {
         const tx = await getTransactionWithRetry(connection, sig.signature);
         
         if (tx && tx.meta) {
+          // Store transaction for analytics (DEX program detection)
+          allTransactions.push(tx);
+          
           const events = parseTransferEvents(tx, mint);
           for (const event of events) {
             event.signature = sig.signature;
@@ -439,6 +451,31 @@ async function txCommand(mint, options) {
     console.log('');
 
     if (allEvents.length === 0) {
+      // Check if JSON output is requested
+      const enableJson = options.json;
+      if (enableJson) {
+        const jsonOutput = {
+          mint: mint,
+          time_window: {
+            hours: hours,
+            cutoff_time: cutoffTime
+          },
+          events: [],
+          wallet_stats: {},
+          roles: {},
+          pattern_label: 'Quiet',
+          likely_scenarios: ['No activity observed in time window'],
+          confidence: 0.0,
+          feature_ratings: {
+            'Observed Transfers': 'Low',
+            'Wallet Concentration': 'Low',
+            'Time Clustering': 'Low'
+          }
+        };
+        console.log(JSON.stringify(jsonOutput, null, 2));
+        return;
+      }
+      
       console.log('No observed token transfers in scope.');
       console.log('');
       console.log('Possible reasons:');
@@ -581,6 +618,127 @@ async function txCommand(mint, options) {
         const netStr = wallet.net >= 0 ? `+${wallet.net.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : wallet.net.toLocaleString('en-US', { maximumFractionDigits: 2 });
         console.log(`    ${wallet.address}`);
         console.log(`      Transactions: ${wallet.count} | Net: ${netStr} | Total: ${wallet.total.toLocaleString('en-US', { maximumFractionDigits: 2 })}`);
+      }
+    }
+
+    // Analytics computation (only if flags are enabled)
+    const enableStory = options.story || options.all;
+    const enableInterpret = options.interpret || options.all;
+    const enableRoles = options.roles || options.all;
+    const enableSignal = options.signal || options.all;
+    const enableJson = options.json;
+    
+    if (enableStory || enableInterpret || enableRoles || enableSignal || enableJson) {
+      // Compute analytics
+      const analyticsStats = computeWalletStats(uniqueEvents);
+      const analyticsRoles = classifyWalletRoles(analyticsStats, tokenAccounts);
+      const pattern = determinePattern(uniqueEvents, analyticsStats, analyticsRoles);
+      const signal = calculateSignalStrength(uniqueEvents, analyticsStats);
+      const story = generateStory(uniqueEvents, analyticsStats, analyticsRoles);
+      const dexPrograms = detectDEXPrograms(allTransactions);
+      
+      // JSON output
+      if (enableJson) {
+        const jsonOutput = {
+          mint: mint,
+          time_window: {
+            hours: hours,
+            cutoff_time: cutoffTime
+          },
+          events: uniqueEvents.map(e => ({
+            type: e.type,
+            amount: e.amount,
+            source: e.source,
+            destination: e.destination,
+            signature: e.signature,
+            timestamp: e.timestamp
+          })),
+          wallet_stats: Object.fromEntries(
+            Array.from(analyticsStats.entries()).map(([addr, stats]) => [
+              addr,
+              {
+                inbound_count: stats.inbound_count,
+                outbound_count: stats.outbound_count,
+                inbound_total: stats.inbound_total,
+                outbound_total: stats.outbound_total,
+                net_flow: stats.net_flow,
+                total_volume: stats.total_volume,
+                unique_counterparties: stats.unique_counterparties,
+                burstiness: stats.burstiness
+              }
+            ])
+          ),
+          roles: Object.fromEntries(analyticsRoles),
+          pattern_label: pattern.pattern,
+          likely_scenarios: pattern.scenarios,
+          confidence: signal.confidence,
+          feature_ratings: signal.feature_ratings
+        };
+        console.log(JSON.stringify(jsonOutput, null, 2));
+        return;
+      }
+      
+      // Text output sections
+      if (enableStory) {
+        console.log('');
+        console.log(sectionHeader('Story'));
+        console.log(`  ${story}`);
+      }
+      
+      if (enableInterpret) {
+        console.log('');
+        console.log(sectionHeader('Interpretation'));
+        console.log(`  Pattern: ${pattern.pattern}`);
+        console.log('');
+        console.log('  Likely Scenarios:');
+        for (const scenario of pattern.scenarios) {
+          console.log(`    • ${scenario}`);
+        }
+      }
+      
+      if (enableRoles) {
+        console.log('');
+        console.log(sectionHeader('Wallet Roles'));
+        if (analyticsRoles.size === 0) {
+          console.log('  No wallets matched role classification criteria.');
+        } else {
+          // Sort by total volume
+          const roleWallets = Array.from(analyticsRoles.entries())
+            .map(([address, role]) => ({
+              address,
+              role,
+              stats: analyticsStats.get(address)
+            }))
+            .filter(w => w.stats)
+            .sort((a, b) => (b.stats.total_volume || 0) - (a.stats.total_volume || 0));
+          
+          for (const wallet of roleWallets) {
+            const stats = wallet.stats;
+            console.log(`  ${wallet.role}: ${wallet.address}`);
+            console.log(`    Volume: ${stats.total_volume.toLocaleString('en-US', { maximumFractionDigits: 2 })} | Net: ${stats.net_flow >= 0 ? '+' : ''}${stats.net_flow.toLocaleString('en-US', { maximumFractionDigits: 2 })} | Counterparties: ${stats.unique_counterparties}`);
+          }
+        }
+      }
+      
+      if (enableSignal) {
+        console.log('');
+        console.log(sectionHeader('Signal Strength'));
+        console.log('  Feature Ratings:');
+        for (const [feature, rating] of Object.entries(signal.feature_ratings)) {
+          console.log(`    ${feature}: ${rating}`);
+        }
+        console.log('');
+        console.log(`  Confidence: ${signal.confidence.toFixed(2)}`);
+      }
+      
+      // Context section (optional, only if DEX programs detected)
+      if (dexPrograms.length > 0) {
+        console.log('');
+        console.log(sectionHeader('Context'));
+        console.log('  Known DEX programs detected:');
+        for (const program of dexPrograms) {
+          console.log(`    • ${program}`);
+        }
       }
     }
 

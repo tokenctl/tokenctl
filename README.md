@@ -197,6 +197,9 @@ tokenctl holders EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --max-accounts 100
 
 **When to use**:
 - Observing actual token transfers between accounts
+- Analyzing wallet behavior patterns
+- Understanding token distribution and accumulation
+- Detecting suspicious activity patterns
 - Verifying token movement activity from top holders
 - Investigating raw token account transfers (not DEX swaps)
 - Understanding token flow patterns from largest accounts
@@ -246,6 +249,69 @@ tokenctl tx EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --limit 20 --hours 48 -
 
 # Show more events in output
 tokenctl tx EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --show 20
+
+# Analytics flags - get behavioral insights
+tokenctl tx EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --story
+tokenctl tx EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --interpret
+tokenctl tx EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --roles
+tokenctl tx EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --signal
+
+# Enable all analytics sections
+tokenctl tx EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --all
+
+# JSON output for machine processing
+tokenctl tx EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --json
+```
+
+**Analytics Flags** (v1.2.0+):
+
+The `tx` command includes optional analytics to help understand transfer patterns:
+
+- `--story`: Prints a compact 2-4 sentence summary of observed behavior
+- `--interpret`: Shows pattern classification (Concentrated Distribution, Consolidation, Churn, Quiet) with likely scenarios
+- `--roles`: Classifies key wallets by role (Distributor, Accumulator, Relay, Sink, Dormant Whale)
+- `--signal`: Displays feature ratings (Observed Transfers, Wallet Concentration, Time Clustering) and confidence score (0.00-1.00)
+- `--all`: Enables all analytics sections (equivalent to `--story --interpret --roles --signal`)
+- `--json`: Outputs machine-readable JSON with events and analytics data
+
+**Example with `--all`**:
+```
+Token
+  Address: <mint>
+
+Activity
+  [observed - from top 8 token accounts, last 24h, not comprehensive]
+  
+  [transfer events...]
+
+Summary
+  Transfers: 10
+  Mint Events: 0
+
+Story
+  Dominant wallet ABC... distributed 124,250 tokens to 2 recipients. Activity was clustered within 2.3 hours. Movement appears concentrated from a single source.
+
+Interpretation
+  Pattern: Concentrated Distribution
+  
+  Likely Scenarios:
+    • Controlled distribution
+    • Airdrop or reward distribution
+    • Treasury rebalance
+
+Wallet Roles
+  Distributor: ABC...
+    Volume: 124,250.83 | Net: -124,250.83 | Counterparties: 2
+  Accumulator: XYZ...
+    Volume: 88,329.60 | Net: +88,329.60 | Counterparties: 1
+
+Signal Strength
+  Feature Ratings:
+    Observed Transfers: Medium
+    Wallet Concentration: High
+    Time Clustering: High
+  
+  Confidence: 0.65
 ```
 
 **Limitations**:

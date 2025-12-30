@@ -10,8 +10,8 @@ const watchCommand = require('../src/commands/watch');
 
 program
   .name('tokenctl')
-  .description('Fast, deterministic Solana token snapshot CLI utility (v1.1.1)')
-  .version('1.1.1');
+  .description('Fast, deterministic Solana token snapshot CLI utility (v1.2)')
+  .version('1.2.0');
 
 program
   .command('rpc')
@@ -52,6 +52,12 @@ program
   .option('--hours <number>', 'Hours to look back (default: 24)', '24')
   .option('--accounts <number>', 'Number of largest token accounts to scan (default: 8, max: 20)', '8')
   .option('--show <number>', 'Number of events to display in output (default: 10)', '10')
+  .option('--story', 'Print a compact Story section summarizing observed behavior')
+  .option('--interpret', 'Print an Interpretation section with pattern label and bullet points')
+  .option('--roles', 'Print a Wallet Roles section classifying key wallets')
+  .option('--signal', 'Print a Signal Strength section with feature ratings and confidence score')
+  .option('--all', 'Enable --story --interpret --roles --signal')
+  .option('--json', 'Output machine-readable JSON document')
   .action(txCommand);
 
 program
