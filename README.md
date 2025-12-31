@@ -324,25 +324,48 @@ Signal Strength
 
 ### `tokenctl watch <mint>`
 
-**What it does**: Continuously monitors a token for changes using polling. Checks authorities, supply, and recent transactions at regular intervals and alerts when significant events occur.
+**What it does**: Behavioral security monitoring tool that continuously monitors a token for changes using polling. Tracks baseline behavior, detects behavioral drift, role changes, dormant wallet activations, and structural security issues.
 
 **When to use**:
-- Monitoring a token you're interested in
+- Monitoring a token for security anomalies
 - Alerting on authority changes (potential rug pull)
 - Tracking supply changes (new mints)
-- Watching for large transfers or mint events
+- Detecting unusual transfer patterns or behavioral drift
+- Monitoring wallet role changes and dormant activations
+- Watching for first DEX interactions and structural security issues
 
 **What it monitors**:
 - **Authority changes**: Alerts if mint or freeze authority changes (potential red flag)
 - **Supply changes**: Alerts when total supply increases or decreases
 - **Large transfers**: Alerts when transfers exceed your threshold
 - **Mint events**: Alerts when new tokens are minted above your threshold
+- **Behavioral drift**: Detects when transfer rate, volume, or counterparties spike >2x baseline
+- **Role changes**: Alerts when wallet roles change (e.g., Accumulator → Distributor)
+- **Dormant activations**: Detects wallets that were inactive but suddenly transact
+- **Structural security**: First DEX interactions, dominant wallet share, authority+activity coincidences
+
+**Baseline behavior**: After 3 intervals, establishes rolling baseline for:
+- Transfers per interval
+- Average transfer size
+- Unique wallets per interval
+- Dominant wallet share
 
 **Alerts**:
-- `ALERT authority_change` - Mint or freeze authority changed (potential rug pull warning)
-- `ALERT supply_change` - Total supply changed (new mints or burns)
+- `ALERT authority_change` - Mint or freeze authority changed
+- `ALERT supply_change` - Total supply changed (highlighted in red)
 - `ALERT large_transfer` - Transfer above threshold detected
 - `ALERT mint_event` - Mint event above threshold detected
+- `ALERT behavior_drift <type>` - Behavioral deviation from baseline (transfer_rate_spike, volume_spike, counterparties_spike)
+- `ALERT role_change <wallet> <old_role> -> <new_role>` - Wallet role changed
+- `ALERT dormant_activation <wallet> <amount>` - Previously inactive wallet activated
+- `ALERT first_dex_interaction` - First DEX program interaction detected
+- `ALERT dominant_wallet_share` - Single wallet controls >60% of interval volume
+- `ALERT authority_activity_coincidence` - Authority change coincided with activity spike
+
+**Flags**:
+- `--strict` - Use stricter thresholds (1.5x instead of 2x for drift detection)
+- `--quiet` - Only print alerts, suppress interval summaries
+- `--json` - Output structured JSON alert events
 
 Press `Ctrl+C` to stop monitoring.
 
@@ -350,10 +373,13 @@ Press `Ctrl+C` to stop monitoring.
 # Basic monitoring (30 second intervals)
 tokenctl watch EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
 
-# Slower polling (60 second intervals)
-tokenctl watch EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --interval 60
+# Strict mode with quieter output
+tokenctl watch EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --strict --quiet
 
-# Custom thresholds for alerts
+# JSON output for programmatic monitoring
+tokenctl watch EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --json
+
+# Custom thresholds
 tokenctl watch EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --transfer-threshold 5000000 --mint-threshold 1000000
 ```
 
@@ -386,6 +412,9 @@ tokenctl watch EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --transfer-threshold
 - `--interval <seconds>` - Polling interval in seconds (default: 30)
 - `--transfer-threshold <number>` - Large transfer threshold (default: 1000000)
 - `--mint-threshold <number>` - Mint event threshold (default: 1000000)
+- `--strict` - Use stricter thresholds for behavioral drift (1.5x instead of 2x)
+- `--quiet` - Only print alerts, suppress interval summaries
+- `--json` - Output structured JSON alert events
 
 ## Performance & Limits
 
