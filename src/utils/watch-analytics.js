@@ -114,6 +114,12 @@ function detectDrift(currentMetrics, baseline, strict = false) {
   
   if (!baseline) return alerts;
   
+  // Normalize: zero-transfer intervals must not emit drift alerts
+  // Skip all drift detection if current interval has zero transfers
+  if (currentMetrics.transfers_per_interval === 0) {
+    return alerts;
+  }
+  
   // Transfer rate spike
   if (baseline.transfers_per_interval > 0) {
     const ratio = currentMetrics.transfers_per_interval / baseline.transfers_per_interval;
@@ -125,8 +131,8 @@ function detectDrift(currentMetrics, baseline, strict = false) {
     }
   }
   
-  // Volume spike (avg transfer size)
-  if (baseline.avg_transfer_size > 0) {
+  // Volume spike (avg transfer size) - only if current has transfers
+  if (baseline.avg_transfer_size > 0 && currentMetrics.avg_transfer_size > 0) {
     const ratio = currentMetrics.avg_transfer_size / baseline.avg_transfer_size;
     if (ratio > threshold) {
       alerts.push({
@@ -136,8 +142,8 @@ function detectDrift(currentMetrics, baseline, strict = false) {
     }
   }
   
-  // Counterparties spike
-  if (baseline.unique_wallets_per_interval > 0) {
+  // Counterparties spike - only if current has transfers
+  if (baseline.unique_wallets_per_interval > 0 && currentMetrics.unique_wallets_per_interval > 0) {
     const ratio = currentMetrics.unique_wallets_per_interval / baseline.unique_wallets_per_interval;
     if (ratio > threshold) {
       alerts.push({

@@ -307,7 +307,8 @@ function calculateConfidence(alert, baseline, currentMetrics, durationIntervals 
  */
 function processAlerts(newAlerts, currentState) {
   const processed = [];
-  const alertHistory = currentState.alertHistory || {};
+  // alertHistory is stored in _internal per user's changes
+  const alertHistory = currentState._internal?.alertHistory || {};
   const baseline = currentState.baseline;
   const currentMetrics = currentState.currentInterval;
   const intervalSeconds = currentState.config.interval || 30;
