@@ -546,50 +546,61 @@ async function createWatchSession(mint, options, callbacks = {}) {
     state._internal.recordDir = recordDir;
   }
 
-  // Fetch initial token info
-  try {
-    const mintInfo = await rpcRetry(() => fetchMintInfo(connection, mint));
-    if (mintInfo) {
-      state._internal.mintMetadataCache = mintInfo;
-      state._internal.mintMetadataCacheAge = 0;
-      
-      state = updateState(state, {
-        token: {
-          name: mintInfo.name || state.token.name,
-          decimals: mintInfo.decimals || state.token.decimals,
-          supply: {
-            display: formatSupply(mintInfo),
-            raw: mintInfo.supplyRaw || mintInfo.supply,
-            decimals: mintInfo.decimals
-          },
-          authorities: {
-            mint_authority: mintInfo.mintAuthority ? mintInfo.mintAuthority.toString() : null,
-            freeze_authority: mintInfo.freezeAuthority ? mintInfo.freezeAuthority.toString() : null
+  // Fetch initial token info (skip in replay mode - no RPC calls)
+  if (!state._internal.replayMode) {
+    try {
+      const mintInfo = await rpcRetry(() => fetchMintInfo(connection, mint));
+      if (mintInfo) {
+        state._internal.mintMetadataCache = mintInfo;
+        state._internal.mintMetadataCacheAge = 0;
+        
+        state = updateState(state, {
+          token: {
+            name: mintInfo.name || state.token.name,
+            decimals: mintInfo.decimals || state.token.decimals,
+            supply: {
+              display: formatSupply(mintInfo),
+              raw: mintInfo.supplyRaw || mintInfo.supply,
+              decimals: mintInfo.decimals
+            },
+            authorities: {
+              mint_authority: mintInfo.mintAuthority ? mintInfo.mintAuthority.toString() : null,
+              freeze_authority: mintInfo.freezeAuthority ? mintInfo.freezeAuthority.toString() : null
+            }
           }
-        }
-      });
+        });
+        state._internal.lastSupply = mintInfo.supply || mintInfo.supplyRaw;
+      }
+    } catch (e) {
+      // Continue without name if fetch fails
     }
-  } catch (e) {
-    // Continue without name if fetch fails
-  }
 
-  // Fetch top token accounts
-  try {
-    const mintPubkey = new PublicKey(mint);
-    const result = await rpcRetry(() => connection.getTokenLargestAccounts(mintPubkey));
-    if (result && result.value) {
-      const topAccounts = result.value.map(acc => ({
-        address: acc.address.toString(),
-        amount: Number(acc.amount)
-      }));
-      state = updateState(state, {
-        token: { topTokenAccounts: topAccounts }
-      });
-      // Store in _internal for headless engine context
-      state._internal.topTokenAccounts = topAccounts;
+    // Fetch top token accounts (skip in replay mode)
+    try {
+      const mintPubkey = new PublicKey(mint);
+      const result = await rpcRetry(() => connection.getTokenLargestAccounts(mintPubkey));
+      if (result && result.value) {
+        const topAccounts = result.value.map(acc => ({
+          address: acc.address.toString(),
+          amount: Number(acc.amount)
+        }));
+        state = updateState(state, {
+          token: { topTokenAccounts: topAccounts }
+        });
+        // Store in _internal for headless engine context
+        state._internal.topTokenAccounts = topAccounts;
+      }
+    } catch (e) {
+      // Continue without top accounts
     }
-  } catch (e) {
-    // Continue without top accounts
+  } else {
+    // In replay mode, initialize lastSupply from first interval if available
+    if (state._internal.replayData && state._internal.replayData.intervals.length > 0) {
+      const firstInterval = state._internal.replayData.intervals[0];
+      if (firstInterval.supply !== undefined && firstInterval.supply !== null) {
+        state._internal.lastSupply = firstInterval.supply;
+      }
+    }
   }
 
   // Call onStart callback
