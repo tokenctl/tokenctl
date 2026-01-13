@@ -269,10 +269,41 @@ The `tx` command includes optional analytics to help understand transfer pattern
 
 - `--story`: Prints a compact 2-4 sentence summary of observed behavior
 - `--interpret`: Shows pattern classification (Concentrated Distribution, Consolidation, Churn, Quiet) with likely scenarios
-- `--roles`: Classifies key wallets by role (Distributor, Accumulator, Relay, Sink, Dormant Whale)
+- `--roles`: Classifies key wallets by behavioral role (see "Understanding Wallet Roles" below)
 - `--signal`: Displays feature ratings (Observed Transfers, Wallet Concentration, Time Clustering) and confidence score (0.00-1.00)
 - `--all`: Enables all analytics sections (equivalent to `--story --interpret --roles --signal`)
 - `--json`: Outputs machine-readable JSON with events and analytics data
+
+**Understanding Wallet Roles**:
+
+Wallet roles are automatically classified based on observed transfer behavior in the time window:
+
+- **Distributor**: 
+  - Criteria: ≥3 outbound transactions, negative net flow (sends more than receives), top volume sender
+  - Indicates: Controlled distribution, airdrops, treasury operations, or selling activity
+  - Example: A wallet that sends tokens to multiple recipients but receives little or nothing back
+
+- **Accumulator**: 
+  - Criteria: ≥3 inbound transactions, positive net flow (receives more than sends), top 3 by inbound volume
+  - Indicates: Accumulation, buying activity, or consolidation behavior
+  - Example: A wallet that receives tokens from multiple sources, building up a position
+
+- **Relay**: 
+  - Criteria: High total volume, balanced flow (net flow ≤10% of total volume), ≥3 unique counterparties
+  - Indicates: Routing activity, market making, intermediary operations, or token forwarding
+  - Example: A wallet that moves tokens through but maintains relatively balanced inflows and outflows
+
+- **Sink**: 
+  - Criteria: High inbound volume, zero outbound transactions
+  - Indicates: Final destination wallets that receive tokens but don't send them
+  - Example: A wallet that accumulates tokens without redistributing them
+
+- **Dormant Whale**: 
+  - Criteria: Large balance holder (appears in top token accounts) but zero activity in the observed time window
+  - Indicates: Inactive large holders who haven't moved tokens during the observation period
+  - Example: A top holder that hasn't transacted in the last 24 hours (or specified time window)
+
+Note: A wallet may not be assigned any role if it doesn't meet the criteria for classification. Roles are based on observed behavior only and do not indicate financial advice or investment signals.
 
 **Example with `--all`**:
 ```
@@ -302,8 +333,19 @@ Interpretation
 Wallet Roles
   Distributor: ABC...
     Volume: 124,250.83 | Net: -124,250.83 | Counterparties: 2
+    (High outbound activity, negative net flow, top volume sender)
+  
   Accumulator: XYZ...
     Volume: 88,329.60 | Net: +88,329.60 | Counterparties: 1
+    (High inbound activity, positive net flow, top 3 by inbound)
+  
+  Relay: DEF...
+    Volume: 200,000.00 | Net: +5,000.00 | Counterparties: 5
+    (High volume with balanced flow, multiple counterparties)
+  
+  Sink: GHI...
+    Volume: 50,000.00 | Net: +50,000.00 | Counterparties: 1
+    (High inbound, zero outbound - final destination)
 
 Signal Strength
   Feature Ratings:
@@ -383,6 +425,65 @@ tokenctl watch EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --json
 tokenctl watch EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --transfer-threshold 5000000 --mint-threshold 1000000
 ```
 
+### `tokenctl live <mint>`
+
+**What it does**: Full-screen TUI (Terminal User Interface) dashboard for behavioral security monitoring. Provides a Cloudflare-style dashboard with real-time charts, alerts table, and interval summaries. Uses the same underlying analytics as `watch` but presents data in a visual, at-a-glance format.
+
+**When to use**:
+- Visual monitoring of token behavior over time
+- Tracking multiple metrics simultaneously (transfers, wallets, volume, roles)
+- Quick overview of recent alerts and current state
+- Situations where you want to see trends and patterns visually
+
+**Dashboard Layout**:
+- **Top Bar**: Token name, mint address, interval, baseline status, RPC host
+- **Row 1 Charts**: Transfers per interval (left), Unique wallets per interval (right) - rolling 30 point window
+- **Row 2 Charts**: Avg transfer size (left), Dominant wallet share (right) - rolling 30 point window
+- **Alerts Table**: Most recent 20 alerts with time, type, details, confidence
+- **Current Interval Summary**: Transfers count, mint events, total volume, unique wallets, supply, authority status, refresh duration
+- **Wallet Roles Summary**: Classified wallets (Distributor, Accumulator, Relay, Sink, Dormant Whale) with volume, net flow, counterparties
+- **Footer**: Status (running/paused), last update time, autosave status, last save path
+
+**Keyboard Controls**:
+- `q` or `ESC` or `Ctrl+C` - Quit and restore terminal
+- `p` - Pause/Resume data polling (freezes charts when paused)
+- `r` - Force immediate refresh (run interval now)
+- `s` - Save snapshot to `./tokenctl-runs/` directory
+- `tab` - Cycle focus between panels (visual navigation)
+- `?` - Toggle help overlay
+
+**Autosave**: By default, snapshots are automatically saved to `./tokenctl-runs/` directory after each interval. Each snapshot is a timestamped JSON file containing:
+- Series data (transfers, wallets, avg size, dominant share arrays)
+- Current interval metrics
+- Roles summary
+- All alerts
+- Baseline status
+
+Disable autosave with `--no-autosave` flag.
+
+**Terminal Requirements**: Minimum terminal size 120x30. If terminal is too small, a warning screen is displayed with required dimensions.
+
+**Flags**:
+- `--rpc <url>` - RPC endpoint URL (overrides config/env)
+- `--interval <seconds>` - Polling interval in seconds (default: 30)
+- `--transfer-threshold <number>` - Alert threshold for large transfers (default: 1000000)
+- `--mint-threshold <number>` - Alert threshold for mint events (default: 1000000)
+- `--strict` - Use stricter thresholds for behavioral drift detection (1.5x instead of 2x)
+- `--no-autosave` - Disable automatic snapshot saving (default: autosave enabled)
+
+**Note**: All data shown is observed from top token accounts only, not comprehensive. No financial advice is provided. The dashboard uses the same analytics logic as `watch` command.
+
+```bash
+# Launch dashboard (default 30s interval, autosave enabled)
+tokenctl live EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+
+# Custom interval, strict mode, no autosave
+tokenctl live EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --interval 60 --strict --no-autosave
+
+# Custom thresholds
+tokenctl live EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --transfer-threshold 5000000
+```
+
 ## Options
 
 ### Global Options
@@ -416,6 +517,13 @@ tokenctl watch EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --transfer-threshold
 - `--quiet` - Only print alerts, suppress interval summaries
 - `--json` - Output structured JSON alert events
 
+**live:**
+- `--interval <seconds>` - Polling interval in seconds (default: 30)
+- `--transfer-threshold <number>` - Large transfer threshold (default: 1000000)
+- `--mint-threshold <number>` - Mint event threshold (default: 1000000)
+- `--strict` - Use stricter thresholds for behavioral drift (1.5x instead of 2x)
+- `--no-autosave` - Disable automatic snapshot saving (default: autosave enabled)
+
 ## Performance & Limits
 
 - **Holder scanning is off by default** in `scan` to avoid rate limits
@@ -446,8 +554,11 @@ tokenctl holders EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --top 5
 # Recent transfer activity
 tokenctl tx EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --limit 10 --accounts 8
 
-# Live monitoring
+# Live monitoring (text mode)
 tokenctl watch EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --interval 60
+
+# Live dashboard (TUI mode)
+tokenctl live EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
 ```
 
 ## Notes

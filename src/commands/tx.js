@@ -105,6 +105,7 @@ function parseTransferEvents(tx, mintAddress) {
   if (!tx || !tx.transaction || !tx.meta) return events;
 
   const mintStr = mintAddress;
+  const debug = process.env.DEBUG === '1';
 
   // Method 1: Check pre/post token balances (most reliable)
   const preBalances = tx.meta.preTokenBalances || [];
@@ -130,27 +131,53 @@ function parseTransferEvents(tx, mintAddress) {
     }
   }
   
+  if (debug) {
+    console.error(`DEBUG parseTransferEvents: Found ${preMap.size} pre balances, ${postMap.size} post balances for mint ${mintStr}`);
+    for (const [key, pre] of preMap.entries()) {
+      const post = postMap.get(key) || { amount: 0 };
+      console.error(`DEBUG parseTransferEvents: Account ${key}: pre=${pre.amount}, post=${post.amount}, change=${post.amount - pre.amount}`);
+    }
+  }
+  
   // Find all accounts with balance changes
   const allAccounts = new Set([...preMap.keys(), ...postMap.keys()]);
+  
+  if (debug) {
+    console.error(`DEBUG parseTransferEvents: Checking ${allAccounts.size} accounts for balance changes`);
+  }
   
   for (const accountKey of allAccounts) {
     const pre = preMap.get(accountKey) || { amount: 0 };
     const post = postMap.get(accountKey) || { amount: 0 };
     const change = post.amount - pre.amount;
     
+    if (debug) {
+      console.error(`DEBUG parseTransferEvents: Account ${accountKey}: pre=${pre.amount}, post=${post.amount}, change=${change}, abs=${Math.abs(change)}`);
+    }
+    
     if (Math.abs(change) > 0.000001) { // Ignore tiny rounding errors
       const owner = post.owner || pre.owner || accountKey;
       
       if (change > 0) {
         // Received tokens - find who sent (look for negative change)
+        // Relaxed matching: look for any negative change, prefer closest match
         let source = null;
+        let bestMatch = Infinity;
         for (const [otherKey, otherPre] of preMap.entries()) {
+          if (otherKey === accountKey) continue; // Skip self
           const otherPost = postMap.get(otherKey) || { amount: 0 };
           const otherChange = otherPost.amount - otherPre.amount;
-          if (otherChange < -0.000001 && Math.abs(otherChange - change) < 0.000001) {
-            source = otherPre.owner || otherPost.owner || otherKey;
-            break;
+          if (otherChange < -0.000001) {
+            const diff = Math.abs(Math.abs(otherChange) - change);
+            if (diff < bestMatch && diff < change * 0.1) { // Allow 10% difference for fees/etc
+              bestMatch = diff;
+              source = otherPre.owner || otherPost.owner || otherKey;
+            }
           }
+        }
+        
+        if (debug) {
+          console.error(`DEBUG parseTransferEvents: Adding transfer event: ${source || 'unknown'} -> ${owner}, amount: ${change}`);
         }
         
         events.push({
@@ -160,16 +187,26 @@ function parseTransferEvents(tx, mintAddress) {
           destination: owner,
           timestamp: tx.blockTime
         });
-      } else {
+      } else if (change < 0) {
         // Sent tokens - find who received (look for positive change)
+        // Relaxed matching: look for any positive change, prefer closest match
         let destination = null;
+        let bestMatch = Infinity;
         for (const [otherKey, otherPre] of preMap.entries()) {
+          if (otherKey === accountKey) continue; // Skip self
           const otherPost = postMap.get(otherKey) || { amount: 0 };
           const otherChange = otherPost.amount - otherPre.amount;
-          if (otherChange > 0.000001 && Math.abs(otherChange + change) < 0.000001) {
-            destination = otherPost.owner || otherPre.owner || otherKey;
-            break;
+          if (otherChange > 0.000001) {
+            const diff = Math.abs(Math.abs(change) - otherChange);
+            if (diff < bestMatch && diff < Math.abs(change) * 0.1) { // Allow 10% difference
+              bestMatch = diff;
+              destination = otherPost.owner || otherPre.owner || otherKey;
+            }
           }
+        }
+        
+        if (debug) {
+          console.error(`DEBUG parseTransferEvents: Adding transfer event: ${owner} -> ${destination || 'unknown'}, amount: ${Math.abs(change)}`);
         }
         
         events.push({
@@ -192,16 +229,38 @@ function parseTransferEvents(tx, mintAddress) {
         if (ix.parsed.type === 'transfer' || ix.parsed.type === 'transferChecked') {
           const info = ix.parsed.info;
           if (info) {
-            // Check if this involves our mint by checking if source/dest accounts match our token accounts
-            const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
-            if (amount > 0) {
-              events.push({
-                type: 'transfer',
-                amount,
-                source: info.source || 'unknown',
-                destination: info.destination || 'unknown',
-                timestamp: tx.blockTime
-              });
+            // Check if this involves our mint
+            let involvesOurMint = false;
+            
+            // Direct mint match
+            if (info.mint === mintStr) {
+              involvesOurMint = true;
+            } else {
+              // Check if source or destination accounts are in our token balance maps
+              // (if they appear in pre/post balances for our mint, they're our token accounts)
+              const sourceInMap = info.source && (preMap.has(info.source) || postMap.has(info.source));
+              const destInMap = info.destination && (preMap.has(info.destination) || postMap.has(info.destination));
+              if (sourceInMap || destInMap) {
+                involvesOurMint = true;
+              }
+            }
+            
+            if (involvesOurMint) {
+              const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
+              if (amount > 0) {
+                if (debug) {
+                  console.error(`DEBUG parseTransferEvents: Found transfer from instruction: ${info.source || 'unknown'} -> ${info.destination || 'unknown'}, amount: ${amount}, mint check: ${info.mint === mintStr ? 'direct' : 'account match'}`);
+                }
+                events.push({
+                  type: 'transfer',
+                  amount,
+                  source: info.source || 'unknown',
+                  destination: info.destination || 'unknown',
+                  timestamp: tx.blockTime
+                });
+              }
+            } else if (debug && info.source && info.destination) {
+              console.error(`DEBUG parseTransferEvents: Transfer instruction found but mint doesn't match: ${info.mint || 'no mint'}, source in map: ${preMap.has(info.source) || postMap.has(info.source)}, dest in map: ${preMap.has(info.destination) || postMap.has(info.destination)}`);
             }
           }
         }
@@ -209,12 +268,17 @@ function parseTransferEvents(tx, mintAddress) {
           const info = ix.parsed.info;
           if (info && info.mint === mintStr) {
             const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
-            events.push({
-              type: 'mint',
-              amount,
-              destination: info.account || info.destination || 'unknown',
-              timestamp: tx.blockTime
-            });
+            if (amount > 0) {
+              if (debug) {
+                console.error(`DEBUG parseTransferEvents: Found mint from instruction: amount: ${amount}, destination: ${info.account || info.destination || 'unknown'}`);
+              }
+              events.push({
+                type: 'mint',
+                amount,
+                destination: info.account || info.destination || 'unknown',
+                timestamp: tx.blockTime
+              });
+            }
           }
         }
       }
@@ -232,15 +296,32 @@ function parseTransferEvents(tx, mintAddress) {
           if (ix.parsed.type === 'transfer' || ix.parsed.type === 'transferChecked') {
             const info = ix.parsed.info;
             if (info) {
-              const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
-              if (amount > 0) {
-                events.push({
-                  type: 'transfer',
-                  amount,
-                  source: info.source || 'unknown',
-                  destination: info.destination || 'unknown',
-                  timestamp: tx.blockTime
-                });
+              // Check if this involves our mint (same logic as top-level instructions)
+              let involvesOurMint = false;
+              if (info.mint === mintStr) {
+                involvesOurMint = true;
+              } else {
+                const sourceInMap = info.source && (preMap.has(info.source) || postMap.has(info.source));
+                const destInMap = info.destination && (preMap.has(info.destination) || postMap.has(info.destination));
+                if (sourceInMap || destInMap) {
+                  involvesOurMint = true;
+                }
+              }
+              
+              if (involvesOurMint) {
+                const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
+                if (amount > 0) {
+                  if (debug) {
+                    console.error(`DEBUG parseTransferEvents: Found transfer from inner instruction: ${info.source || 'unknown'} -> ${info.destination || 'unknown'}, amount: ${amount}`);
+                  }
+                  events.push({
+                    type: 'transfer',
+                    amount,
+                    source: info.source || 'unknown',
+                    destination: info.destination || 'unknown',
+                    timestamp: tx.blockTime
+                  });
+                }
               }
             }
           }
@@ -248,12 +329,82 @@ function parseTransferEvents(tx, mintAddress) {
             const info = ix.parsed.info;
             if (info && info.mint === mintStr) {
               const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
-              events.push({
-                type: 'mint',
-                amount,
-                destination: info.account || info.destination || 'unknown',
-                timestamp: tx.blockTime
-              });
+              if (amount > 0) {
+                if (debug) {
+                  console.error(`DEBUG parseTransferEvents: Found mint from inner instruction: amount: ${amount}`);
+                }
+                events.push({
+                  type: 'mint',
+                  amount,
+                  destination: info.account || info.destination || 'unknown',
+                  timestamp: tx.blockTime
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Method 3: Fallback - if we found the mint in balances but no changes,
+  // check ALL transfer instructions in the transaction more aggressively
+  // This handles cases where transfers happen but balances net to zero (e.g., DEX swaps)
+  // Also check if ANY token account in the transaction matches accounts we know about
+  const knownTokenAccounts = new Set([...preMap.keys(), ...postMap.keys()]);
+  
+  if (knownTokenAccounts.size > 0 || preBalances.some(b => b.mint === mintStr) || postBalances.some(b => b.mint === mintStr)) {
+    // We found our mint in the transaction - check all instructions aggressively
+    const allInstructions = [
+      ...(tx.transaction?.message?.instructions || []),
+      ...(tx.meta?.innerInstructions || []).flatMap(inner => inner.instructions || [])
+    ];
+    
+    // Also build a set of all token account addresses from the transaction
+    const allTokenAccountsInTx = new Set();
+    for (const pre of preBalances) {
+      if (pre.owner) allTokenAccountsInTx.add(pre.owner);
+    }
+    for (const post of postBalances) {
+      if (post.owner) allTokenAccountsInTx.add(post.owner);
+    }
+    
+    for (const ix of allInstructions) {
+      if (ix.program === 'spl-token' || ix.programId === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') {
+        if (ix.parsed && (ix.parsed.type === 'transfer' || ix.parsed.type === 'transferChecked')) {
+          const info = ix.parsed.info;
+          if (info) {
+            // Check if source or destination appears in our known accounts OR in any token account in the tx
+            const sourceInMap = info.source && (knownTokenAccounts.has(info.source) || allTokenAccountsInTx.has(info.source));
+            const destInMap = info.destination && (knownTokenAccounts.has(info.destination) || allTokenAccountsInTx.has(info.destination));
+            
+            // Also check if mint matches directly
+            const mintMatches = info.mint === mintStr;
+            
+            if (sourceInMap || destInMap || mintMatches) {
+              const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
+              if (amount > 0) {
+                // Check if we already have this event (avoid duplicates)
+                const alreadyExists = events.some(e => 
+                  e.type === 'transfer' &&
+                  Math.abs(e.amount - amount) < 0.000001 &&
+                  e.source === (info.source || 'unknown') &&
+                  e.destination === (info.destination || 'unknown')
+                );
+                
+                if (!alreadyExists) {
+                  if (debug) {
+                    console.error(`DEBUG parseTransferEvents: Found transfer via fallback method: ${info.source || 'unknown'} -> ${info.destination || 'unknown'}, amount: ${amount}, match: ${mintMatches ? 'mint' : (sourceInMap || destInMap ? 'account' : 'none')}`);
+                  }
+                  events.push({
+                    type: 'transfer',
+                    amount,
+                    source: info.source || 'unknown',
+                    destination: info.destination || 'unknown',
+                    timestamp: tx.blockTime
+                  });
+                }
+              }
             }
           }
         }
@@ -265,7 +416,7 @@ function parseTransferEvents(tx, mintAddress) {
   const uniqueEvents = [];
   const seen = new Set();
   for (const event of events) {
-    const key = `${event.type}-${event.amount}-${event.source}-${event.destination}`;
+    const key = `${event.type}-${event.amount.toFixed(6)}-${event.source}-${event.destination}`;
     if (!seen.has(key)) {
       seen.add(key);
       uniqueEvents.push(event);
@@ -386,6 +537,26 @@ async function txCommand(mint, options) {
       }
     }
 
+    // Fallback Method: Also query mint address directly for signatures
+    // This catches transfers that might not show up in token account queries
+    try {
+      const mintSigs = await getTokenAccountSignatures(
+        connection,
+        mint,
+        Math.ceil(limit * 2) // Get more from mint address
+      );
+      for (const sig of mintSigs) {
+        allSignatures.push({
+          signature: sig.signature,
+          blockTime: sig.blockTime,
+          account: 'mint' // Mark as from mint address
+        });
+      }
+      await sleep(500);
+    } catch (e) {
+      // Continue if mint address query fails (some tokens don't have mint signatures)
+    }
+
     // Deduplicate by signature
     const sigMap = new Map();
     for (const sig of allSignatures) {
@@ -409,22 +580,35 @@ async function txCommand(mint, options) {
     let transferCount = 0;
     let mintCount = 0;
 
+    let txFetchCount = 0;
+    let txNullCount = 0;
+    let txNoMetaCount = 0;
+    
     for (let i = 0; i < filteredSigs.length; i++) {
       const sig = filteredSigs[i];
       try {
         const tx = await getTransactionWithRetry(connection, sig.signature);
+        txFetchCount++;
         
-        if (tx && tx.meta) {
-          // Store transaction for analytics (DEX program detection)
-          allTransactions.push(tx);
-          
-          const events = parseTransferEvents(tx, mint);
-          for (const event of events) {
-            event.signature = sig.signature;
-            allEvents.push(event);
-            if (event.type === 'transfer') transferCount++;
-            if (event.type === 'mint') mintCount++;
-          }
+        if (!tx) {
+          txNullCount++;
+          continue;
+        }
+        
+        if (!tx.meta) {
+          txNoMetaCount++;
+          continue;
+        }
+        
+        // Store transaction for analytics (DEX program detection)
+        allTransactions.push(tx);
+        
+        const events = parseTransferEvents(tx, mint);
+        for (const event of events) {
+          event.signature = sig.signature;
+          allEvents.push(event);
+          if (event.type === 'transfer') transferCount++;
+          if (event.type === 'mint') mintCount++;
         }
       } catch (e) {
         // Skip transactions that can't be parsed
@@ -434,6 +618,24 @@ async function txCommand(mint, options) {
       // Small delay between transaction fetches
       if (i < filteredSigs.length - 1) {
         await sleep(500);
+      }
+    }
+    
+    // Debug output if no events found
+    if (allEvents.length === 0 && process.env.DEBUG === '1') {
+      console.error(`DEBUG: Fetched ${txFetchCount} transactions, ${txNullCount} were null, ${txNoMetaCount} had no meta`);
+      if (allTransactions.length > 0) {
+        const sampleTx = allTransactions[0];
+        console.error(`DEBUG: Sample tx has meta: ${!!sampleTx.meta}`);
+        console.error(`DEBUG: Sample tx preTokenBalances: ${sampleTx.meta?.preTokenBalances?.length || 0}`);
+        console.error(`DEBUG: Sample tx postTokenBalances: ${sampleTx.meta?.postTokenBalances?.length || 0}`);
+        if (sampleTx.meta?.preTokenBalances) {
+          const mints = new Set();
+          sampleTx.meta.preTokenBalances.forEach(b => mints.add(b.mint));
+          sampleTx.meta.postTokenBalances?.forEach(b => mints.add(b.mint));
+          console.error(`DEBUG: Mints in sample tx: ${Array.from(mints).join(', ')}`);
+          console.error(`DEBUG: Looking for mint: ${mint}`);
+        }
       }
     }
 
@@ -749,3 +951,4 @@ async function txCommand(mint, options) {
 }
 
 module.exports = txCommand;
+module.exports.parseTransferEvents = parseTransferEvents;

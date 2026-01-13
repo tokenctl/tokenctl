@@ -9,7 +9,18 @@ const { computeWalletStats, classifyWalletRoles, detectDEXPrograms } = require('
  * @returns {Object} Interval metrics
  */
 function computeIntervalMetrics(events) {
-  const transferEvents = events.filter(e => e.type === 'transfer');
+  // Ensure events is an array
+  if (!Array.isArray(events)) {
+    return {
+      transfers_per_interval: 0,
+      avg_transfer_size: 0,
+      unique_wallets_per_interval: 0,
+      dominant_wallet_share: 0,
+      total_volume: 0
+    };
+  }
+  
+  const transferEvents = events.filter(e => e && e.type === 'transfer');
   
   if (transferEvents.length === 0) {
     return {
@@ -65,17 +76,21 @@ function computeIntervalMetrics(events) {
  * @returns {Object} Baseline metrics or null if not enough data
  */
 function computeBaseline(intervalMetrics, baselineIntervals = 3) {
-  if (intervalMetrics.length < baselineIntervals) {
+  if (!Array.isArray(intervalMetrics) || intervalMetrics.length < baselineIntervals) {
     return null;
   }
   
   // Use most recent N intervals for baseline
-  const recent = intervalMetrics.slice(-baselineIntervals);
+  const recent = intervalMetrics.slice(-baselineIntervals).filter(m => m && typeof m === 'object');
   
-  const transfers = recent.map(m => m.transfers_per_interval);
-  const avgSizes = recent.map(m => m.avg_transfer_size);
-  const uniqueWallets = recent.map(m => m.unique_wallets_per_interval);
-  const dominantShares = recent.map(m => m.dominant_wallet_share);
+  if (recent.length < baselineIntervals) {
+    return null;
+  }
+  
+  const transfers = recent.map(m => m.transfers_per_interval || 0);
+  const avgSizes = recent.map(m => m.avg_transfer_size || 0);
+  const uniqueWallets = recent.map(m => m.unique_wallets_per_interval || 0);
+  const dominantShares = recent.map(m => m.dominant_wallet_share || 0);
   
   return {
     transfers_per_interval: transfers.reduce((a, b) => a + b, 0) / transfers.length,
@@ -257,7 +272,8 @@ function detectStructuralAlerts(currentMetrics, baseline, transactions, authorit
     alerts.push({
       type: 'first_dex_interaction',
       dex_programs: dexPrograms,
-      explanation: `First DEX interaction detected: ${dexPrograms.join(', ')}`
+      explanation: `First DEX interaction detected: ${dexPrograms.join(', ')}`,
+      condition_key: 'first_dex_interaction'
     });
   }
   
@@ -266,7 +282,8 @@ function detectStructuralAlerts(currentMetrics, baseline, transactions, authorit
     alerts.push({
       type: 'dominant_wallet_share',
       share: currentMetrics.dominant_wallet_share,
-      explanation: `Dominant wallet controls ${(currentMetrics.dominant_wallet_share * 100).toFixed(1)}% of interval volume`
+      explanation: `Dominant wallet controls ${(currentMetrics.dominant_wallet_share * 100).toFixed(1)}% of interval volume`,
+      condition_key: 'dominant_wallet_share'
     });
   }
   
@@ -276,7 +293,8 @@ function detectStructuralAlerts(currentMetrics, baseline, transactions, authorit
     if (activityIncrease) {
       alerts.push({
         type: 'authority_activity_coincidence',
-        explanation: `Authority change coincided with ${((currentMetrics.transfers_per_interval / baseline.transfers_per_interval) * 100).toFixed(0)}% increase in transfer activity`
+        explanation: `Authority change coincided with ${((currentMetrics.transfers_per_interval / baseline.transfers_per_interval) * 100).toFixed(0)}% increase in transfer activity`,
+        condition_key: 'authority_activity_coincidence'
       });
     }
   }

@@ -9,8 +9,13 @@
 function computeWalletStats(events) {
   const stats = new Map();
   
+  // Ensure events is an array
+  if (!Array.isArray(events)) {
+    return stats;
+  }
+  
   for (const event of events) {
-    if (event.type !== 'transfer') continue;
+    if (!event || typeof event !== 'object' || event.type !== 'transfer') continue;
     if (event.source === 'unknown' && event.destination === 'unknown') continue;
     
     // Track outbound (source)

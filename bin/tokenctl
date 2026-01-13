@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+// Setup error handlers first
+const { setupErrorHandlers } = require('../src/logging/logger');
+setupErrorHandlers();
+
 const { program } = require('commander');
 const rpcCommand = require('../src/commands/rpc');
 const scanCommand = require('../src/commands/scan');
@@ -7,6 +11,7 @@ const reportCommand = require('../src/commands/report');
 const holdersCommand = require('../src/commands/holders');
 const txCommand = require('../src/commands/tx');
 const watchCommand = require('../src/commands/watch');
+const liveCommand = require('../src/commands/live');
 
 program
   .name('tokenctl')
@@ -21,56 +26,73 @@ program
 
 program
   .command('scan <mint>')
-  .description('Deterministic on-chain token snapshot: metadata, supply, authorities, activity, and risk verdict')
+  .description('Deterministic on-chain token snapshot: fetches token metadata (name, symbol, decimals, URI), supply info, authorities (mint authority, freeze authority), recent activity summary, and risk verdict. Verdict analyzes: authority status (revoked/active), top 10 holder concentration, supply changes, and activity patterns. Uses Dexscreener API fallback for token names if on-chain metadata unavailable.')
   .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
-  .option('--sig-limit <number>', 'Number of signatures to fetch for activity analysis', '10')
-  .option('--holders', 'Include holder distribution analysis (heavy operation, off by default)')
-  .option('--max-accounts <number>', 'Maximum accounts to scan for holders', '5000')
+  .option('--sig-limit <number>', 'Number of signatures to fetch per account for activity analysis (default: 10)', '10')
+  .option('--holders', 'Include holder distribution analysis: total holders, concentration metrics, top accounts with percentages (heavy operation, off by default)')
+  .option('--max-accounts <number>', 'Maximum accounts to scan for holder analysis (default: 5000)', '5000')
   .action(scanCommand);
 
 program
   .command('report <mint>')
-  .description('Generate compact, single-block text report for sharing (Telegram/Discord friendly)')
+  .description('Generate compact, single-block text report optimized for sharing on Telegram/Discord. Includes token metadata, supply, authorities, top holders, and risk verdict in a condensed format.')
   .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
-  .option('--max-accounts <number>', 'Maximum accounts to scan for holders', '5000')
+  .option('--max-accounts <number>', 'Maximum accounts to scan for holder analysis (default: 5000)', '5000')
   .action(reportCommand);
 
 program
   .command('holders <mint>')
-  .description('Analyze token holder distribution: total holders, concentration, top accounts')
+  .description('Analyze token holder distribution: total holder count, concentration metrics (top 10 share, top 1 share), and top account details. Shows holder count accuracy and distribution health indicators.')
   .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
-  .option('--top <number>', 'Number of top holders to analyze', '10')
-  .option('--list', 'Display top account addresses with percentages')
-  .option('--max-accounts <number>', 'Maximum accounts to scan', '5000')
+  .option('--top <number>', 'Number of top holders to analyze and display (default: 10)', '10')
+  .option('--list', 'Display top account addresses with their token amounts and percentage of total supply')
+  .option('--max-accounts <number>', 'Maximum accounts to scan for holder analysis (default: 5000)', '5000')
   .action(holdersCommand);
 
 program
   .command('tx <mint>')
-  .description('Observe recent on-chain token transfers from top token accounts (not DEX trading data)')
+  .description('Observe recent on-chain token transfers from top token accounts. Shows SPL token transfers with amounts, source/destination addresses, timestamps, and transaction signatures. Includes optional behavioral analytics: wallet roles (Distributor, Accumulator, Relay, Sink, Dormant Whale), pattern detection (Concentrated Distribution, Consolidation, Churn, Quiet), and signal strength scoring. Note: Shows observed data from top accounts only, not comprehensive. Not DEX trading data.')
   .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
-  .option('--limit <number>', 'Maximum signatures to fetch (default: 10, max: 50)', '10')
-  .option('--hours <number>', 'Hours to look back (default: 24)', '24')
+  .option('--limit <number>', 'Maximum signatures to fetch per account (default: 10, max: 50)', '10')
+  .option('--hours <number>', 'Hours to look back for transactions (default: 24)', '24')
   .option('--accounts <number>', 'Number of largest token accounts to scan (default: 8, max: 20)', '8')
   .option('--show <number>', 'Number of events to display in output (default: 10)', '10')
-  .option('--story', 'Print a compact Story section summarizing observed behavior')
-  .option('--interpret', 'Print an Interpretation section with pattern label and bullet points')
-  .option('--roles', 'Print a Wallet Roles section classifying key wallets')
-  .option('--signal', 'Print a Signal Strength section with feature ratings and confidence score')
-  .option('--all', 'Enable --story --interpret --roles --signal')
-  .option('--json', 'Output machine-readable JSON document')
+  .option('--story', 'Print a compact 2-4 sentence Story section summarizing observed behavior (dominant wallets, net flows, clustering)')
+  .option('--interpret', 'Print an Interpretation section with pattern classification (Concentrated Distribution, Consolidation, Churn, Quiet) and likely scenarios')
+  .option('--roles', 'Print a Wallet Roles section classifying key wallets: Distributor (high outbound, negative net flow), Accumulator (high inbound, positive net flow), Relay (balanced flow, multiple counterparties), Sink (inbound only), Dormant Whale (large balance, no activity)')
+  .option('--signal', 'Print a Signal Strength section with feature ratings (Observed Transfers, Wallet Concentration, Time Clustering) and confidence score (0.00-1.00)')
+  .option('--all', 'Enable all analytics sections (equivalent to --story --interpret --roles --signal)')
+  .option('--json', 'Output machine-readable JSON document with events and analytics data')
   .action(txCommand);
 
 program
   .command('watch <mint>')
-  .description('Behavioral security monitoring: continuously monitor token for authority changes, supply changes, behavioral drift, role changes, and structural security alerts')
+  .description('Behavioral security monitoring tool that continuously monitors a token using polling. Tracks baseline behavior (transfers per interval, avg transfer size, unique wallets, dominant wallet share) after 3 intervals. Detects: authority changes (potential rug pull), supply changes, large transfers/mints, behavioral drift (>2x baseline spikes), wallet role changes (Distributor/Accumulator/Relay/Sink), dormant wallet activations, first DEX interactions, dominant wallet share (>60%), and authority+activity coincidences. Displays token name in monitoring output.')
   .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
   .option('--interval <seconds>', 'Polling interval in seconds (default: 30)', '30')
-  .option('--transfer-threshold <number>', 'Alert threshold for large transfers (default: 1000000)', '1000000')
-  .option('--mint-threshold <number>', 'Alert threshold for mint events (default: 1000000)', '1000000')
-  .option('--strict', 'Use stricter thresholds for behavioral drift detection (1.5x instead of 2x)')
-  .option('--quiet', 'Only print alerts, suppress interval summaries')
-  .option('--json', 'Output structured JSON alert events')
+  .option('--transfer-threshold <number>', 'Alert threshold for large transfers in token units (default: 1000000)', '1000000')
+  .option('--mint-threshold <number>', 'Alert threshold for mint events in token units (default: 1000000)', '1000000')
+  .option('--strict', 'Use stricter thresholds for behavioral drift detection (1.5x instead of 2x baseline multiplier)')
+  .option('--quiet', 'Only print alerts, suppress regular interval summaries (baseline status, transfer counts, etc.)')
+  .option('--json', 'Output structured JSON alert events for machine processing')
+  .option('--debug', 'Enable debug mode: write interval snapshots to ./tokenctl-runs/debug/')
+  .option('--record', 'Record raw transactions and events to ./tokenctl-runs/raw/<timestamp>/ for replay')
+  .option('--replay <fileOrDir>', 'Replay recorded data from file or directory (no RPC calls)')
   .action(watchCommand);
+
+program
+  .command('live <mint>')
+  .description('Full-screen TUI dashboard for behavioral security monitoring. Displays real-time charts (transfers, wallets, avg size, dominant share), alerts table, current interval summary, and wallet roles. Updates every interval. Keyboard controls: q (quit), p (pause/resume), r (refresh), s (save snapshot), tab (cycle panels), ? (help). Autosaves snapshots to ./tokenctl-runs/ by default. Requires terminal size 120x30 minimum.')
+  .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
+  .option('--interval <seconds>', 'Polling interval in seconds (default: 30)', '30')
+  .option('--transfer-threshold <number>', 'Alert threshold for large transfers in token units (default: 1000000)', '1000000')
+  .option('--mint-threshold <number>', 'Alert threshold for mint events in token units (default: 1000000)', '1000000')
+  .option('--strict', 'Use stricter thresholds for behavioral drift detection (1.5x instead of 2x baseline multiplier)')
+  .option('--no-autosave', 'Disable automatic snapshot saving (default: autosave enabled)')
+  .option('--record', 'Record raw transactions and events to ./tokenctl-runs/raw/<timestamp>/ for replay')
+  .option('--replay <fileOrDir>', 'Replay recorded data from file or directory (no RPC calls)')
+  .option('--debug', 'Enable debug mode: write interval snapshots to ./tokenctl-runs/debug/')
+  .action(liveCommand);
 
 program.parse();
 

@@ -19,7 +19,9 @@
   "dependencies": {
     "@solana/web3.js": "^1.95.4",
     "commander": "^12.1.0",
-    "bs58": "^6.0.0"
+    "bs58": "^6.0.0",
+    "blessed": "^0.1.81",
+    "blessed-contrib": "^4.11.0"
   }
 }
 
