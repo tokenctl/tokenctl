@@ -60,28 +60,34 @@ function parseTransaction(tx, mintAddress) {
   return result;
 }
 
-// Concurrency control for transaction fetching
+// Concurrency control for transaction fetching with Promise batching
+// Preserves transaction ordering while using bounded concurrency
 async function fetchTransactionsConcurrently(connection, signatures, maxConcurrency = 10) {
-  const results = [];
-  const queue = [...signatures];
+  const results = new Array(signatures.length);
   
-  async function fetchNext() {
-    while (queue.length > 0) {
-      const sig = queue.shift();
-      try {
-        const tx = await connection.getTransaction(sig, {
-          commitment: 'confirmed',
-          maxSupportedTransactionVersion: 0
-        });
-        results.push({ signature: sig, transaction: tx });
-      } catch (e) {
-        results.push({ signature: sig, transaction: null, error: e.message });
-      }
-    }
+  // Process in batches to preserve ordering
+  for (let i = 0; i < signatures.length; i += maxConcurrency) {
+    const batch = signatures.slice(i, i + maxConcurrency);
+    const batchPromises = batch.map((sig, batchIndex) => 
+      connection.getTransaction(sig, {
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0
+      }).then(tx => ({
+        signature: sig,
+        transaction: tx
+      })).catch(e => ({
+        signature: sig,
+        transaction: null,
+        error: e.message
+      }))
+    );
+    
+    const batchResults = await Promise.all(batchPromises);
+    // Store results in original order
+    batchResults.forEach((result, batchIndex) => {
+      results[i + batchIndex] = result;
+    });
   }
-  
-  const workers = Array(Math.min(maxConcurrency, signatures.length)).fill(null).map(() => fetchNext());
-  await Promise.all(workers);
   
   return results;
 }
@@ -196,12 +202,14 @@ async function runInterval(ctx) {
     
     // Check for authority/supply changes
     const alerts = [];
+    let shouldRefreshCache = false;
     if (_internal.lastMintInfo) {
       const authChanged = 
         (mintInfo.mintAuthority?.toString() !== _internal.lastMintInfo.mintAuthority?.toString()) ||
         (mintInfo.freezeAuthority?.toString() !== _internal.lastMintInfo.freezeAuthority?.toString());
       
       if (authChanged) {
+        shouldRefreshCache = true; // Refresh cache on authority change
         alerts.push({
           timestamp: formatTime(),
           type: 'authority_change',
@@ -225,6 +233,11 @@ async function runInterval(ctx) {
     // Update internal tracking (will be persisted in context)
     _internal.lastMintInfo = mintInfo;
     _internal.lastSupply = mintInfo.supply;
+    
+    // Reset cache age if authority changed (forces refresh next interval)
+    if (shouldRefreshCache) {
+      _internal.mintMetadataCacheAge = 10; // Force refresh next interval
+    }
 
     // Fetch signatures (with caching)
     let signatures = [];
@@ -286,6 +299,8 @@ async function runInterval(ctx) {
               // Check for large transfers/mints
               const parsed = parseTransaction(result.transaction, mint);
               if (parsed.mintEvent && parsed.mintAmount >= config.mintThreshold) {
+                // Refresh cache on mint event
+                _internal.mintMetadataCacheAge = 10;
                 alerts.push({
                   timestamp: formatTime(),
                   type: 'mint_event',
@@ -294,14 +309,17 @@ async function runInterval(ctx) {
                   explanation: `Mint event: ${parsed.mintAmount.toLocaleString()}`
                 });
               }
-              if (parsed.transfer && parsed.transferAmount >= config.transferThreshold) {
-                alerts.push({
-                  timestamp: formatTime(),
-                  type: 'large_transfer',
-                  amount: parsed.transferAmount,
-                  signature: result.signature,
-                  explanation: `Large transfer: ${parsed.transferAmount.toLocaleString()}`
-                });
+              // Check for burn events (transfer to null/zero address)
+              if (parsed.transfer) {
+                if (parsed.transferAmount >= config.transferThreshold) {
+                  alerts.push({
+                    timestamp: formatTime(),
+                    type: 'large_transfer',
+                    amount: parsed.transferAmount,
+                    signature: result.signature,
+                    explanation: `Large transfer: ${parsed.transferAmount.toLocaleString()}`
+                  });
+                }
               }
             }
             
