@@ -214,6 +214,7 @@ function writeCrashReport(error, context = null) {
 /**
  * Safe stage runner with error handling
  * Wraps stage execution, tracks timing, captures errors, and writes crash reports on failure
+ * Logs warning if stage exceeds 2x interval duration
  */
 async function runStage(stageName, ctx, fn) {
   const start = Date.now();
@@ -232,6 +233,16 @@ async function runStage(stageName, ctx, fn) {
     errorContext.timings[stageName] = duration;
     errorContext.last_ok_phase = stageName;
     addBreadcrumb(stageName, `Completed in ${duration}ms`);
+    
+    // Check for timeout warning: if stage exceeds 2x interval duration
+    const intervalSeconds = errorContext.interval ? parseInt(errorContext.interval, 10) : 30;
+    const intervalMs = intervalSeconds * 1000;
+    const timeoutThreshold = intervalMs * 2;
+    
+    if (duration > timeoutThreshold) {
+      logWarn(`Stage '${stageName}' exceeded 2x interval duration: ${duration}ms (threshold: ${timeoutThreshold}ms, interval: ${intervalSeconds}s)`);
+    }
+    
     return result;
   } catch (error) {
     const duration = Date.now() - start;
@@ -424,6 +435,30 @@ function showTUIErrorOverlay(screen, error, logFile) {
   });
 }
 
+// Debug log file writer (shared across modules)
+let debugLogStream = null;
+let debugLogPath = null;
+
+function initDebugLog() {
+  const runsDir = path.join(process.cwd(), 'tokenctl-runs');
+  if (!fs.existsSync(runsDir)) {
+    fs.mkdirSync(runsDir, { recursive: true });
+  }
+  const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '');
+  debugLogPath = path.join(runsDir, `debug-${timestamp}.log`);
+  debugLogStream = fs.createWriteStream(debugLogPath, { flags: 'a' });
+  return debugLogPath;
+}
+
+function debugLog(...args) {
+  if (!debugLogStream) {
+    initDebugLog();
+  }
+  const timestamp = new Date().toISOString();
+  const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)).join(' ');
+  debugLogStream.write(`[${timestamp}] ${message}\n`);
+}
+
 module.exports = {
   initContext,
   setTUIState,
@@ -436,5 +471,7 @@ module.exports = {
   logError,
   handleFatalError,
   setupErrorHandlers,
-  showTUIErrorOverlay
+  showTUIErrorOverlay,
+  debugLog,
+  initDebugLog
 };

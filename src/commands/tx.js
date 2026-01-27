@@ -52,15 +52,24 @@ async function getTokenAccountSignatures(connection, tokenAccount, limit, maxRet
   return [];
 }
 
-async function getTransactionWithRetry(connection, signature, maxRetries = 2) {
+// Wrapper with retry logic (uses watch-core.fetchTransaction)
+async function getTransactionWithRetry(connection, signature, maxRetries = 2, timeoutMs = 8000) {
+  const { fetchTransaction } = require('../utils/watch-core');
   let triedJsonFallback = false;
   
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const tx = await connection.getTransaction(signature, {
+      // Race the fetch against a timeout
+      const fetchPromise = fetchTransaction(connection, signature, {
         encoding: 'jsonParsed',
         maxSupportedTransactionVersion: 0
       });
+      
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Transaction fetch timeout')), timeoutMs)
+      );
+      
+      const tx = await Promise.race([fetchPromise, timeoutPromise]);
       return tx;
     } catch (e) {
       const errorMsg = e.message || String(e);
@@ -79,10 +88,16 @@ async function getTransactionWithRetry(connection, signature, maxRetries = 2) {
       if ((errorMsg.includes('At path') || errorMsg.includes('Expected')) && !triedJsonFallback) {
         triedJsonFallback = true;
         try {
-          const txJson = await connection.getTransaction(signature, {
+          const fetchJsonPromise = fetchTransaction(connection, signature, {
             encoding: 'json',
             maxSupportedTransactionVersion: 0
           });
+          
+          const timeoutJsonPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Transaction fetch timeout')), timeoutMs)
+          );
+          
+          const txJson = await Promise.race([fetchJsonPromise, timeoutJsonPromise]);
           return txJson;
         } catch (e2) {
           // If json encoding also fails, return null
@@ -100,331 +115,15 @@ async function getTransactionWithRetry(connection, signature, maxRetries = 2) {
   return null;
 }
 
-function parseTransferEvents(tx, mintAddress) {
-  const events = [];
-  if (!tx || !tx.transaction || !tx.meta) return events;
-
-  const mintStr = mintAddress;
-  const debug = process.env.DEBUG === '1';
-
-  // Method 1: Check pre/post token balances (most reliable)
-  const preBalances = tx.meta.preTokenBalances || [];
-  const postBalances = tx.meta.postTokenBalances || [];
-  
-  // Build maps of pre/post balances by account
-  const preMap = new Map();
-  const postMap = new Map();
-  
-  for (const pre of preBalances) {
-    if (pre.mint === mintStr) {
-      const key = pre.owner || `index:${pre.accountIndex}`;
-      const amount = parseFloat(pre.uiTokenAmount?.uiAmountString || pre.uiTokenAmount?.uiAmount || 0);
-      preMap.set(key, { amount, owner: pre.owner, accountIndex: pre.accountIndex });
-    }
-  }
-  
-  for (const post of postBalances) {
-    if (post.mint === mintStr) {
-      const key = post.owner || `index:${post.accountIndex}`;
-      const amount = parseFloat(post.uiTokenAmount?.uiAmountString || post.uiTokenAmount?.uiAmount || 0);
-      postMap.set(key, { amount, owner: post.owner, accountIndex: post.accountIndex });
-    }
-  }
-  
-  if (debug) {
-    console.error(`DEBUG parseTransferEvents: Found ${preMap.size} pre balances, ${postMap.size} post balances for mint ${mintStr}`);
-    for (const [key, pre] of preMap.entries()) {
-      const post = postMap.get(key) || { amount: 0 };
-      console.error(`DEBUG parseTransferEvents: Account ${key}: pre=${pre.amount}, post=${post.amount}, change=${post.amount - pre.amount}`);
-    }
-  }
-  
-  // Find all accounts with balance changes
-  const allAccounts = new Set([...preMap.keys(), ...postMap.keys()]);
-  
-  if (debug) {
-    console.error(`DEBUG parseTransferEvents: Checking ${allAccounts.size} accounts for balance changes`);
-  }
-  
-  for (const accountKey of allAccounts) {
-    const pre = preMap.get(accountKey) || { amount: 0 };
-    const post = postMap.get(accountKey) || { amount: 0 };
-    const change = post.amount - pre.amount;
-    
-    if (debug) {
-      console.error(`DEBUG parseTransferEvents: Account ${accountKey}: pre=${pre.amount}, post=${post.amount}, change=${change}, abs=${Math.abs(change)}`);
-    }
-    
-    if (Math.abs(change) > 0.000001) { // Ignore tiny rounding errors
-      const owner = post.owner || pre.owner || accountKey;
-      
-      if (change > 0) {
-        // Received tokens - find who sent (look for negative change)
-        // Relaxed matching: look for any negative change, prefer closest match
-        let source = null;
-        let bestMatch = Infinity;
-        for (const [otherKey, otherPre] of preMap.entries()) {
-          if (otherKey === accountKey) continue; // Skip self
-          const otherPost = postMap.get(otherKey) || { amount: 0 };
-          const otherChange = otherPost.amount - otherPre.amount;
-          if (otherChange < -0.000001) {
-            const diff = Math.abs(Math.abs(otherChange) - change);
-            if (diff < bestMatch && diff < change * 0.1) { // Allow 10% difference for fees/etc
-              bestMatch = diff;
-              source = otherPre.owner || otherPost.owner || otherKey;
-            }
-          }
-        }
-        
-        if (debug) {
-          console.error(`DEBUG parseTransferEvents: Adding transfer event: ${source || 'unknown'} -> ${owner}, amount: ${change}`);
-        }
-        
-        events.push({
-          type: 'transfer',
-          amount: change,
-          source: source || 'unknown',
-          destination: owner,
-          timestamp: tx.blockTime
-        });
-      } else if (change < 0) {
-        // Sent tokens - find who received (look for positive change)
-        // Relaxed matching: look for any positive change, prefer closest match
-        let destination = null;
-        let bestMatch = Infinity;
-        for (const [otherKey, otherPre] of preMap.entries()) {
-          if (otherKey === accountKey) continue; // Skip self
-          const otherPost = postMap.get(otherKey) || { amount: 0 };
-          const otherChange = otherPost.amount - otherPre.amount;
-          if (otherChange > 0.000001) {
-            const diff = Math.abs(Math.abs(change) - otherChange);
-            if (diff < bestMatch && diff < Math.abs(change) * 0.1) { // Allow 10% difference
-              bestMatch = diff;
-              destination = otherPost.owner || otherPre.owner || otherKey;
-            }
-          }
-        }
-        
-        if (debug) {
-          console.error(`DEBUG parseTransferEvents: Adding transfer event: ${owner} -> ${destination || 'unknown'}, amount: ${Math.abs(change)}`);
-        }
-        
-        events.push({
-          type: 'transfer',
-          amount: Math.abs(change),
-          source: owner,
-          destination: destination || 'unknown',
-          timestamp: tx.blockTime
-        });
-      }
-    }
-  }
-
-  // Method 2: Parse instructions (backup method)
-  // Note: With 'json' encoding, instructions may not be parsed, so we check for ix.parsed
-  const instructions = (tx.transaction?.message?.instructions) || [];
-  for (const ix of instructions) {
-    if (ix.program === 'spl-token' || ix.programId === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') {
-      if (ix.parsed) {
-        if (ix.parsed.type === 'transfer' || ix.parsed.type === 'transferChecked') {
-          const info = ix.parsed.info;
-          if (info) {
-            // Check if this involves our mint
-            let involvesOurMint = false;
-            
-            // Direct mint match
-            if (info.mint === mintStr) {
-              involvesOurMint = true;
-            } else {
-              // Check if source or destination accounts are in our token balance maps
-              // (if they appear in pre/post balances for our mint, they're our token accounts)
-              const sourceInMap = info.source && (preMap.has(info.source) || postMap.has(info.source));
-              const destInMap = info.destination && (preMap.has(info.destination) || postMap.has(info.destination));
-              if (sourceInMap || destInMap) {
-                involvesOurMint = true;
-              }
-            }
-            
-            if (involvesOurMint) {
-              const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
-              if (amount > 0) {
-                if (debug) {
-                  console.error(`DEBUG parseTransferEvents: Found transfer from instruction: ${info.source || 'unknown'} -> ${info.destination || 'unknown'}, amount: ${amount}, mint check: ${info.mint === mintStr ? 'direct' : 'account match'}`);
-                }
-                events.push({
-                  type: 'transfer',
-                  amount,
-                  source: info.source || 'unknown',
-                  destination: info.destination || 'unknown',
-                  timestamp: tx.blockTime
-                });
-              }
-            } else if (debug && info.source && info.destination) {
-              console.error(`DEBUG parseTransferEvents: Transfer instruction found but mint doesn't match: ${info.mint || 'no mint'}, source in map: ${preMap.has(info.source) || postMap.has(info.source)}, dest in map: ${preMap.has(info.destination) || postMap.has(info.destination)}`);
-            }
-          }
-        }
-        if (ix.parsed.type === 'mintTo' || ix.parsed.type === 'mintToChecked') {
-          const info = ix.parsed.info;
-          if (info && info.mint === mintStr) {
-            const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
-            if (amount > 0) {
-              if (debug) {
-                console.error(`DEBUG parseTransferEvents: Found mint from instruction: amount: ${amount}, destination: ${info.account || info.destination || 'unknown'}`);
-              }
-              events.push({
-                type: 'mint',
-                amount,
-                destination: info.account || info.destination || 'unknown',
-                timestamp: tx.blockTime
-              });
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // Check inner instructions
-  // Note: With 'json' encoding, inner instructions may not be parsed, so we check for ix.parsed
-  const innerInstructions = tx.meta.innerInstructions || [];
-  for (const inner of innerInstructions) {
-    const innerIxs = inner.instructions || [];
-    for (const ix of innerIxs) {
-      if (ix.program === 'spl-token' || ix.programId === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') {
-        if (ix.parsed) {
-          if (ix.parsed.type === 'transfer' || ix.parsed.type === 'transferChecked') {
-            const info = ix.parsed.info;
-            if (info) {
-              // Check if this involves our mint (same logic as top-level instructions)
-              let involvesOurMint = false;
-              if (info.mint === mintStr) {
-                involvesOurMint = true;
-              } else {
-                const sourceInMap = info.source && (preMap.has(info.source) || postMap.has(info.source));
-                const destInMap = info.destination && (preMap.has(info.destination) || postMap.has(info.destination));
-                if (sourceInMap || destInMap) {
-                  involvesOurMint = true;
-                }
-              }
-              
-              if (involvesOurMint) {
-                const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
-                if (amount > 0) {
-                  if (debug) {
-                    console.error(`DEBUG parseTransferEvents: Found transfer from inner instruction: ${info.source || 'unknown'} -> ${info.destination || 'unknown'}, amount: ${amount}`);
-                  }
-                  events.push({
-                    type: 'transfer',
-                    amount,
-                    source: info.source || 'unknown',
-                    destination: info.destination || 'unknown',
-                    timestamp: tx.blockTime
-                  });
-                }
-              }
-            }
-          }
-          if (ix.parsed.type === 'mintTo' || ix.parsed.type === 'mintToChecked') {
-            const info = ix.parsed.info;
-            if (info && info.mint === mintStr) {
-              const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
-              if (amount > 0) {
-                if (debug) {
-                  console.error(`DEBUG parseTransferEvents: Found mint from inner instruction: amount: ${amount}`);
-                }
-                events.push({
-                  type: 'mint',
-                  amount,
-                  destination: info.account || info.destination || 'unknown',
-                  timestamp: tx.blockTime
-                });
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // Method 3: Fallback - if we found the mint in balances but no changes,
-  // check ALL transfer instructions in the transaction more aggressively
-  // This handles cases where transfers happen but balances net to zero (e.g., DEX swaps)
-  // Also check if ANY token account in the transaction matches accounts we know about
-  const knownTokenAccounts = new Set([...preMap.keys(), ...postMap.keys()]);
-  
-  if (knownTokenAccounts.size > 0 || preBalances.some(b => b.mint === mintStr) || postBalances.some(b => b.mint === mintStr)) {
-    // We found our mint in the transaction - check all instructions aggressively
-    const allInstructions = [
-      ...(tx.transaction?.message?.instructions || []),
-      ...(tx.meta?.innerInstructions || []).flatMap(inner => inner.instructions || [])
-    ];
-    
-    // Also build a set of all token account addresses from the transaction
-    const allTokenAccountsInTx = new Set();
-    for (const pre of preBalances) {
-      if (pre.owner) allTokenAccountsInTx.add(pre.owner);
-    }
-    for (const post of postBalances) {
-      if (post.owner) allTokenAccountsInTx.add(post.owner);
-    }
-    
-    for (const ix of allInstructions) {
-      if (ix.program === 'spl-token' || ix.programId === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') {
-        if (ix.parsed && (ix.parsed.type === 'transfer' || ix.parsed.type === 'transferChecked')) {
-          const info = ix.parsed.info;
-          if (info) {
-            // Check if source or destination appears in our known accounts OR in any token account in the tx
-            const sourceInMap = info.source && (knownTokenAccounts.has(info.source) || allTokenAccountsInTx.has(info.source));
-            const destInMap = info.destination && (knownTokenAccounts.has(info.destination) || allTokenAccountsInTx.has(info.destination));
-            
-            // Also check if mint matches directly
-            const mintMatches = info.mint === mintStr;
-            
-            if (sourceInMap || destInMap || mintMatches) {
-              const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
-              if (amount > 0) {
-                // Check if we already have this event (avoid duplicates)
-                const alreadyExists = events.some(e => 
-                  e.type === 'transfer' &&
-                  Math.abs(e.amount - amount) < 0.000001 &&
-                  e.source === (info.source || 'unknown') &&
-                  e.destination === (info.destination || 'unknown')
-                );
-                
-                if (!alreadyExists) {
-                  if (debug) {
-                    console.error(`DEBUG parseTransferEvents: Found transfer via fallback method: ${info.source || 'unknown'} -> ${info.destination || 'unknown'}, amount: ${amount}, match: ${mintMatches ? 'mint' : (sourceInMap || destInMap ? 'account' : 'none')}`);
-                  }
-                  events.push({
-                    type: 'transfer',
-                    amount,
-                    source: info.source || 'unknown',
-                    destination: info.destination || 'unknown',
-                    timestamp: tx.blockTime
-                  });
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // Deduplicate events (same signature, same amount, same accounts)
-  const uniqueEvents = [];
-  const seen = new Set();
-  for (const event of events) {
-    const key = `${event.type}-${event.amount.toFixed(6)}-${event.source}-${event.destination}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      uniqueEvents.push(event);
-    }
-  }
-
-  return uniqueEvents;
+// Wrapper: delegates to watch-core.parseTransferEvents
+// This maintains backward compatibility for CLI tx command
+function parseTransferEvents(tx, mintAddress, tokenProgram = 'spl-token') {
+  const { parseTransferEvents: coreParseTransferEvents } = require('../utils/watch-core');
+  return coreParseTransferEvents(tx, mintAddress);
 }
+
+// OLD IMPLEMENTATION REMOVED - now uses watch-core
+// All parsing logic has been consolidated into src/utils/watch-core.js
 
 function findSourceAccount(tx, destinationAccount, mintStr) {
   // Look for transfers where destination matches
@@ -460,6 +159,8 @@ async function txCommand(mint, options) {
   let hours = parseInt(options.hours) || 24;
   let accounts = parseInt(options.accounts) || 8;
   let show = parseInt(options.show) || 10;
+  let timeoutMs = parseInt(options.timeout) || 8000;
+  let maxRetries = parseInt(options.retries) || 2;
 
   // Hard caps
   if (limit > 50) {
@@ -573,8 +274,8 @@ async function txCommand(mint, options) {
 
     process.stderr.write(`Collecting transaction signatures... ✓ (${filteredSigs.length} unique)\n`);
 
-    // Fetch and parse transactions sequentially
-    process.stderr.write('Parsing transactions...\r');
+    // Fetch and parse transactions sequentially with live progress
+    process.stderr.write('Parsing transactions...\n');
     const allEvents = [];
     const allTransactions = []; // Store for DEX program detection
     let transferCount = 0;
@@ -583,20 +284,29 @@ async function txCommand(mint, options) {
     let txFetchCount = 0;
     let txNullCount = 0;
     let txNoMetaCount = 0;
+    let txErrorCount = 0;
     
     for (let i = 0; i < filteredSigs.length; i++) {
       const sig = filteredSigs[i];
+      const shortSig = sig.signature.slice(0, 8) + '...' + sig.signature.slice(-4);
+      const progress = `[${i + 1}/${filteredSigs.length}]`;
+      
+      // Show which transaction we're fetching
+      process.stderr.write(`  ${progress} ${shortSig} fetching...\r`);
+      
       try {
-        const tx = await getTransactionWithRetry(connection, sig.signature);
+        const tx = await getTransactionWithRetry(connection, sig.signature, maxRetries, timeoutMs);
         txFetchCount++;
         
         if (!tx) {
           txNullCount++;
+          process.stderr.write(`  ${progress} ${shortSig} ⏱ unavailable/timeout          \n`);
           continue;
         }
         
         if (!tx.meta) {
           txNoMetaCount++;
+          process.stderr.write(`  ${progress} ${shortSig} ✗ no metadata               \n`);
           continue;
         }
         
@@ -604,6 +314,14 @@ async function txCommand(mint, options) {
         allTransactions.push(tx);
         
         const events = parseTransferEvents(tx, mint);
+        
+        // Show success with event count
+        if (events.length > 0) {
+          process.stderr.write(`  ${progress} ${shortSig} ✓ ${events.length} event(s)              \n`);
+        } else {
+          process.stderr.write(`  ${progress} ${shortSig} ✓ no relevant events       \n`);
+        }
+        
         for (const event of events) {
           event.signature = sig.signature;
           allEvents.push(event);
@@ -611,7 +329,8 @@ async function txCommand(mint, options) {
           if (event.type === 'mint') mintCount++;
         }
       } catch (e) {
-        // Skip transactions that can't be parsed
+        txErrorCount++;
+        process.stderr.write(`  ${progress} ${shortSig} ✗ error: ${e.message.slice(0, 30)}...\n`);
         continue;
       }
 
@@ -620,6 +339,10 @@ async function txCommand(mint, options) {
         await sleep(500);
       }
     }
+    
+    // Final summary
+    const successCount = txFetchCount - txNullCount - txNoMetaCount;
+    process.stderr.write(`\nParsing transactions... ✓ (${successCount} succeeded, ${txNullCount} unavailable, ${txNoMetaCount} no metadata, ${txErrorCount} errors)\n\n`);
     
     // Debug output if no events found
     if (allEvents.length === 0 && process.env.DEBUG === '1') {
@@ -638,8 +361,6 @@ async function txCommand(mint, options) {
         }
       }
     }
-
-    process.stderr.write('Parsing transactions... ✓\n\n');
 
     // Output
     console.log(sectionHeader('Token'));

@@ -1,5 +1,5 @@
 const { colorize } = require('../utils/colors');
-const { createWatchSession, formatTime } = require('../utils/watch-core-v2');
+const { createWatchSession, formatTime } = require('../watch/session');
 const { initContext } = require('../logging/logger');
 
 async function watchCommand(mint, options) {

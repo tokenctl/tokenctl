@@ -12,6 +12,7 @@ const holdersCommand = require('../src/commands/holders');
 const txCommand = require('../src/commands/tx');
 const watchCommand = require('../src/commands/watch');
 const liveCommand = require('../src/commands/live');
+const infoCommand = require('../src/commands/info');
 
 program
   .name('tokenctl')
@@ -23,6 +24,12 @@ program
   .description('Test RPC endpoint connection and measure response latency')
   .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
   .action(rpcCommand);
+
+program
+  .command('info <mint>')
+  .description('Check token program and support status. Outputs: token program, supported (yes/no), reason if unsupported.')
+  .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
+  .action(infoCommand);
 
 program
   .command('scan <mint>')
@@ -57,6 +64,8 @@ program
   .option('--hours <number>', 'Hours to look back for transactions (default: 24)', '24')
   .option('--accounts <number>', 'Number of largest token accounts to scan (default: 8, max: 20)', '8')
   .option('--show <number>', 'Number of events to display in output (default: 10)', '10')
+  .option('--timeout <ms>', 'Timeout in milliseconds for each transaction fetch (default: 8000)', '8000')
+  .option('--retries <number>', 'Number of retry attempts for failed fetches (default: 2)', '2')
   .option('--story', 'Print a compact 2-4 sentence Story section summarizing observed behavior (dominant wallets, net flows, clustering)')
   .option('--interpret', 'Print an Interpretation section with pattern classification (Concentrated Distribution, Consolidation, Churn, Quiet) and likely scenarios')
   .option('--roles', 'Print a Wallet Roles section classifying key wallets: Distributor (high outbound, negative net flow), Accumulator (high inbound, positive net flow), Relay (balanced flow, multiple counterparties), Sink (inbound only), Dormant Whale (large balance, no activity)')
@@ -69,6 +78,8 @@ program
   .command('watch <mint>')
   .description('Behavioral security monitoring tool that continuously monitors a token using polling. Tracks baseline behavior (transfers per interval, avg transfer size, unique wallets, dominant wallet share) after 3 intervals. Detects: authority changes (potential rug pull), supply changes, large transfers/mints, behavioral drift (>2x baseline spikes), wallet role changes (Distributor/Accumulator/Relay/Sink), dormant wallet activations, first DEX interactions, dominant wallet share (>60%), and authority+activity coincidences. Displays token name in monitoring output.')
   .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
+  .option('--rpc-mode <mode>', 'Explicit RPC mode: helius-raw | helius-enhanced | public | quicknode (auto-detected if not specified)')
+  .option('--rpc-fallback', 'Automatically fallback to public RPC if primary RPC fails')
   .option('--interval <seconds>', 'Polling interval in seconds (default: 30)', '30')
   .option('--transfer-threshold <number>', 'Alert threshold for large transfers in token units (default: 1000000)', '1000000')
   .option('--mint-threshold <number>', 'Alert threshold for mint events in token units (default: 1000000)', '1000000')
@@ -84,6 +95,8 @@ program
   .command('live <mint>')
   .description('Full-screen TUI dashboard for behavioral security monitoring. Displays real-time charts (transfers, wallets, avg size, dominant share), alerts table, current interval summary, and wallet roles. Updates every interval. Keyboard controls: q (quit), p (pause/resume), r (refresh), s (save snapshot), tab (cycle panels), ? (help). Autosaves snapshots to ./tokenctl-runs/ by default. Requires terminal size 120x30 minimum.')
   .option('--rpc <url>', 'RPC endpoint URL (overrides config/env)')
+  .option('--rpc-mode <mode>', 'Explicit RPC mode: helius-raw | helius-enhanced | public | quicknode (auto-detected if not specified)')
+  .option('--rpc-fallback', 'Automatically fallback to public RPC if primary RPC fails')
   .option('--interval <seconds>', 'Polling interval in seconds (default: 30)', '30')
   .option('--transfer-threshold <number>', 'Alert threshold for large transfers in token units (default: 1000000)', '1000000')
   .option('--mint-threshold <number>', 'Alert threshold for mint events in token units (default: 1000000)', '1000000')

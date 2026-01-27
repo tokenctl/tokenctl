@@ -1,6 +1,6 @@
 # tokenctl
 
-A fast, deterministic Solana token snapshot CLI utility (v1.1). Provides on-chain token analysis without financial advice or audit claims.
+A fast, deterministic Solana token snapshot CLI utility (v1.3.0). Provides on-chain token analysis without financial advice or audit claims.
 
 ## Installation
 
@@ -141,7 +141,6 @@ The `scan` command provides a risk classification based on on-chain data:
   - Low holder count (<100) with very high concentration (top 10 >30% with <50 holders, or top 10 >50% with <100 holders)
   - Active mint authority with high top holder concentration (>50%) or recent mint events
   - **Warning**: These patterns are commonly associated with rug pulls and scams
-
 **Important**: Verdicts are based solely on on-chain data analysis and are not financial advice. Always conduct your own research and due diligence.
 
 ### `tokenctl report <mint>`
@@ -508,6 +507,8 @@ tokenctl live EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --transfer-threshold 
 - `--hours <number>` - Hours to look back (default: 24)
 - `--accounts <number>` - Number of largest token accounts to scan (default: 8, max: 20)
 - `--show <number>` - Number of events to display (default: 10)
+- `--timeout <ms>` - RPC timeout per transaction in milliseconds (default: 15000)
+- `--retries <number>` - Number of retry attempts for failed RPC calls (default: 3)
 
 **watch:**
 - `--interval <seconds>` - Polling interval in seconds (default: 30)
@@ -561,6 +562,46 @@ tokenctl watch EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --interval 60
 tokenctl live EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
 ```
 
+## Token-2022 Support
+
+**All commands now support Token-2022 tokens** in addition to SPL Token:
+
+- Automatic detection of token program (SPL Token vs Token-2022)
+- Fallback handling for Token-2022 transaction encoding differences
+- Unknown token program safety: Process stops with warning if token uses unsupported program
+- Full feature parity: `scan`, `tx`, `watch`, and `live` all work with Token-2022
+
+**Technical details**:
+- SPL Token program: `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`
+- Token-2022 program: `TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`
+- Automatic retry with `json` encoding if `jsonParsed` fails (Token-2022 schema compatibility)
+
+## Progress Feedback & Reliability (v1.3.0)
+
+**`tx` command now provides live progress feedback:**
+
+```
+Parsing transactions...
+  [1/20] abc12345...xyz9 fetching...
+  [1/20] abc12345...xyz9 ✓ 3 event(s)
+  [2/20] def67890...uvw8 ⏱ unavailable/timeout
+  [3/20] ghi11223...rst7 ✗ no metadata
+  ...
+  
+Parsing transactions... ✓ (15 succeeded, 3 unavailable, 2 no metadata, 0 errors)
+```
+
+**Configurable RPC reliability:**
+- `--timeout <ms>` - Set RPC timeout per transaction (default: 15000ms)
+- `--retries <number>` - Set retry attempts for failed calls (default: 3)
+- Prevents hanging on slow/unresponsive RPC endpoints
+- Clear feedback on what's happening with each transaction
+
+**Debug logging** (live command):
+- Debug output redirected to `tokenctl-runs/debug-{timestamp}.log`
+- Keeps TUI clean while preserving diagnostic information
+- Log file path shown at startup
+
 ## Notes
 
 - All activity data is "observed" and not comprehensive
@@ -569,3 +610,4 @@ tokenctl live EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
 - Use a reliable RPC endpoint for best performance
 - Holder scanning is intentionally separate to avoid rate limits on public RPCs
 - `tx` command shows raw token transfers, not DEX trading activity - use Dexscreener or similar tools for swap/trading data
+- Token-2022 tokens are fully supported across all commands

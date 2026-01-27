@@ -1,549 +1,343 @@
-const { PublicKey } = require('@solana/web3.js');
-const { getRpcUrl, createConnection, validateMint, rpcRetry, sleep } = require('./rpc');
-const { fetchMintInfo } = require('./mint');
-const {
-  computeIntervalMetrics,
-  computeBaseline,
-  detectDrift,
-  detectRoleChanges,
-  detectDormantActivation,
-  calculateSignalConfidence,
-  detectStructuralAlerts,
-  computeWalletStats,
-  classifyWalletRoles
-} = require('./watch-analytics');
-const txCommand = require('../commands/tx');
-const parseTransferEvents = txCommand.parseTransferEvents;
+// Canonical transaction fetching and transfer parsing module
+// This is the ONLY place that calls connection.getTransaction and parses transfer events
+// Pure functions: no logging, no retries, no side effects
 
-// Re-export parseTransaction for watch.js compatibility
-function parseTransaction(tx, mintAddress) {
-  const result = { mintEvent: false, transfer: false, mintAmount: 0, transferAmount: 0 };
+const { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } = require('./mint');
 
-  if (!tx.transaction || !tx.transaction.message) {
-    return result;
+/**
+ * Fetch a single transaction (pure function, no retries)
+ * @param {Connection} connection - Solana connection
+ * @param {string} signature - Transaction signature
+ * @param {object} options - Options (encoding, commitment, maxSupportedTransactionVersion)
+ * @returns {Promise<object|null>} Transaction or null if not found
+ */
+async function fetchTransaction(connection, signature, options = {}) {
+  const {
+    encoding = 'jsonParsed',
+    commitment = 'confirmed',
+    maxSupportedTransactionVersion = 0
+  } = options;
+
+  try {
+    const tx = await connection.getTransaction(signature, {
+      encoding,
+      commitment,
+      maxSupportedTransactionVersion
+    });
+    return tx;
+  } catch (e) {
+    // Pure function: throw errors, don't handle them
+    throw e;
   }
-
-  const instructions = tx.transaction.message.instructions || [];
-  
-  for (const ix of instructions) {
-    if (ix.program === 'spl-token' || ix.programId === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') {
-      if (ix.parsed && ix.parsed.type === 'mintTo') {
-        if (ix.parsed.info.mint === mintAddress) {
-          result.mintEvent = true;
-          result.mintAmount = parseAmount(ix.parsed.info.tokenAmount);
-        }
-      }
-      if (ix.parsed && ix.parsed.type === 'transfer') {
-        result.transfer = true;
-        result.transferAmount = parseAmount(ix.parsed.info.tokenAmount);
-      }
-    }
-  }
-
-  const innerInstructions = tx.meta?.innerInstructions || [];
-  for (const inner of innerInstructions) {
-    for (const ix of inner.instructions) {
-      if (ix.program === 'spl-token' || ix.programId === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') {
-        if (ix.parsed && ix.parsed.type === 'mintTo') {
-          if (ix.parsed.info.mint === mintAddress) {
-            result.mintEvent = true;
-            result.mintAmount = parseAmount(ix.parsed.info.tokenAmount);
-          }
-        }
-        if (ix.parsed && ix.parsed.type === 'transfer') {
-          result.transfer = true;
-          result.transferAmount = parseAmount(ix.parsed.info.tokenAmount);
-        }
-      }
-    }
-  }
-
-  return result;
-}
-
-function parseAmount(tokenAmount) {
-  if (!tokenAmount) return 0;
-  if (typeof tokenAmount === 'string') {
-    return parseFloat(tokenAmount) || 0;
-  }
-  if (tokenAmount.uiAmount !== undefined) {
-    return tokenAmount.uiAmount || 0;
-  }
-  if (tokenAmount.amount) {
-    return parseFloat(tokenAmount.amount) || 0;
-  }
-  return 0;
-}
-
-async function getTransactionWithRetry(connection, signature, maxRetries = 2) {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const tx = await connection.getTransaction(signature, {
-        commitment: 'confirmed',
-        maxSupportedTransactionVersion: 0
-      });
-      if (tx) return tx;
-    } catch (e) {
-      if (attempt < maxRetries) {
-        await sleep(1000);
-      }
-    }
-  }
-  return null;
-}
-
-function formatTime() {
-  return new Date().toISOString().replace('T', ' ').substring(0, 19) + 'Z';
 }
 
 /**
- * Core watch loop that can run in text mode or live mode
- * @param {string} mint - Mint address
- * @param {object} options - Options (interval, transferThreshold, mintThreshold, strict, quiet, jsonOutput, rpc)
- * @param {object} callbacks - Callbacks for different events
- * @returns {Promise<object>} Initial state object
+ * Parse transfer events from a transaction (pure function, no logging)
+ * Supports both SPL Token and Token-2022
+ * @param {object} tx - Transaction object
+ * @param {string} mintAddress - Mint address to filter for
+ * @returns {Array} Array of transfer/mint events
  */
-async function createWatchSession(mint, options, callbacks = {}) {
-  if (!validateMint(mint)) {
-    throw new Error('Invalid mint address');
+function parseTransferEvents(tx, mintAddress) {
+  const events = [];
+  
+  if (!tx || !tx.transaction || !tx.meta) {
+    return events;
   }
 
-  const rpcUrl = getRpcUrl(options);
-  const connection = createConnection(rpcUrl);
-  const interval = parseInt(options.interval) || 30;
-  const transferThreshold = parseFloat(options.transferThreshold) || 1000000;
-  const mintThreshold = parseFloat(options.mintThreshold) || 1000000;
-  const strict = options.strict || false;
+  const mintStr = mintAddress;
+  const splTokenProgramId = TOKEN_PROGRAM_ID.toString();
+  const token2022ProgramId = TOKEN_2022_PROGRAM_ID.toString();
 
-  // Behavioral monitoring state
-  const intervalMetrics = [];
-  let baseline = null;
-  let previousRoles = new Map();
-  let activeWallets = new Set();
-  let topTokenAccounts = [];
-  let firstDEXDetected = false;
-
-  let lastMintInfo = null;
-  let lastSupply = null;
-  let lastSignature = null;
-  let tokenName = null;
-
-  // Fetch initial token info
-  try {
-    const initialMintInfo = await rpcRetry(() => fetchMintInfo(connection, mint));
-    if (initialMintInfo && initialMintInfo.name) {
-      tokenName = initialMintInfo.name;
+  // Method 1: Check pre/post token balances (most reliable)
+  const preBalances = tx.meta.preTokenBalances || [];
+  const postBalances = tx.meta.postTokenBalances || [];
+  
+  // Build maps of pre/post balances by account
+  const preMap = new Map();
+  const postMap = new Map();
+  
+  // Normalize mint address for comparison
+  const normalizeMint = (m) => {
+    if (!m) return null;
+    const mStr = typeof m === 'string' ? m : m.toString();
+    return mStr.toLowerCase().trim();
+  };
+  const normalizedMint = normalizeMint(mintStr);
+  
+  for (const pre of preBalances) {
+    const preMint = normalizeMint(pre.mint);
+    if (preMint === normalizedMint) {
+      const key = pre.owner || `index:${pre.accountIndex}`;
+      const amount = parseFloat(pre.uiTokenAmount?.uiAmountString || pre.uiTokenAmount?.uiAmount || 0);
+      preMap.set(key, { amount, owner: pre.owner, accountIndex: pre.accountIndex });
     }
+  }
+  
+  for (const post of postBalances) {
+    const postMint = normalizeMint(post.mint);
+    if (postMint === normalizedMint) {
+      const key = post.owner || `index:${post.accountIndex}`;
+      const amount = parseFloat(post.uiTokenAmount?.uiAmountString || post.uiTokenAmount?.uiAmount || 0);
+      postMap.set(key, { amount, owner: post.owner, accountIndex: post.accountIndex });
+    }
+  }
+  
+  // Find all accounts with balance changes
+  const allAccounts = new Set([...preMap.keys(), ...postMap.keys()]);
+  
+  for (const accountKey of allAccounts) {
+    const pre = preMap.get(accountKey) || { amount: 0 };
+    const post = postMap.get(accountKey) || { amount: 0 };
+    const change = post.amount - pre.amount;
     
-    try {
-      const mintPubkey = new PublicKey(mint);
-      const result = await rpcRetry(() => connection.getTokenLargestAccounts(mintPubkey));
-      if (result && result.value) {
-        topTokenAccounts = result.value.map(acc => ({
-          address: acc.address.toString(),
-          amount: Number(acc.amount)
-        }));
-      }
-    } catch (e) {
-      // Continue without top accounts
-    }
-  } catch (e) {
-    // Continue without name if fetch fails
-  }
-
-  if (callbacks.onStart) {
-    callbacks.onStart({
-      mint,
-      tokenName,
-      interval,
-      strict,
-      rpcUrl
-    });
-  }
-
-  let checkCount = 0;
-
-  /**
-   * Run a single watch interval
-   * @returns {Promise<object>} Interval result object
-   */
-  async function runInterval() {
-    const startedAt = Date.now();
-    let rpcErrors = 0;
-    let partial = false;
-
-    try {
-      const mintInfo = await rpcRetry(() => fetchMintInfo(connection, mint));
+    if (Math.abs(change) > 0.000001) { // Ignore tiny rounding errors
+      const owner = post.owner || pre.owner || accountKey;
       
-      if (!mintInfo) {
-        rpcErrors++;
-        return {
-          success: false,
-          error: 'RPC error',
-          rpcErrors: 1,
-          duration_ms: Date.now() - startedAt
-        };
-      }
-      
-      if (mintInfo.name && !tokenName) {
-        tokenName = mintInfo.name;
-      }
-      
-      checkCount++;
-      
-      // Format supply
-      let supplyDisplay = 'unknown';
-      let supplyRaw = null;
-      if (mintInfo.supplyRaw && mintInfo.decimals) {
-        const rawAmount = BigInt(mintInfo.supplyRaw);
-        const divisor = BigInt(10 ** mintInfo.decimals);
-        const wholePart = rawAmount / divisor;
-        const fractionalPart = rawAmount % divisor;
-        const fractionalStr = fractionalPart.toString().padStart(mintInfo.decimals, '0');
-        const cleanFractional = fractionalStr.replace(/0+$/, '');
-        const supplyValue = cleanFractional ? `${wholePart.toString()}.${cleanFractional}` : wholePart.toString();
-        const parts = supplyValue.split('.');
-        parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-        supplyDisplay = parts.join('.');
-        supplyRaw = mintInfo.supplyRaw;
-      } else {
-        supplyDisplay = mintInfo.supply.toLocaleString();
-        supplyRaw = mintInfo.supply;
-      }
-      
-      // Check for authority changes
-      let authorityChanged = false;
-      const alerts = [];
-      
-      if (lastMintInfo) {
-        if (mintInfo.mintAuthority?.toString() !== lastMintInfo.mintAuthority?.toString() ||
-            mintInfo.freezeAuthority?.toString() !== lastMintInfo.freezeAuthority?.toString()) {
-          authorityChanged = true;
-          alerts.push({
-            timestamp: formatTime(),
-            type: 'authority_change',
-            mint_authority: mintInfo.mintAuthority ? mintInfo.mintAuthority.toString() : null,
-            freeze_authority: mintInfo.freezeAuthority ? mintInfo.freezeAuthority.toString() : null,
-            explanation: `Mint Auth: ${mintInfo.mintAuthority ? mintInfo.mintAuthority.toString() : 'revoked'}, Freeze Auth: ${mintInfo.freezeAuthority ? mintInfo.freezeAuthority.toString() : 'revoked'}`
-          });
-        }
-
-        if (mintInfo.supply !== lastSupply) {
-          alerts.push({
-            timestamp: formatTime(),
-            type: 'supply_change',
-            previous: lastSupply,
-            current: mintInfo.supply,
-            explanation: `Supply changed from ${lastSupply.toLocaleString()} to ${mintInfo.supply.toLocaleString()}`
-          });
-        }
-      }
-
-      lastMintInfo = mintInfo;
-      lastSupply = mintInfo.supply;
-
-      // Collect events for this interval
-      const intervalEvents = [];
-      const intervalTransactions = [];
-      let authorityChangedThisInterval = authorityChanged;
-
-      try {
-        const signatures = await rpcRetry(() => 
-          connection.getSignaturesForAddress(new PublicKey(mint), { limit: 20 })
-        );
-
-        if (signatures && signatures.length > 0) {
-          const newestSig = signatures[0].signature;
-          
-          const newSigs = [];
-          if (lastSignature) {
-            let foundLast = false;
-            for (const sig of signatures) {
-              if (sig.signature === lastSignature) {
-                foundLast = true;
-                break;
-              }
-              newSigs.push(sig);
-            }
-            if (!foundLast) {
-              newSigs.push(...signatures.slice(0, 10));
-            }
-          } else {
-            newSigs.push(...signatures.slice(0, 10));
-          }
-
-          for (const sig of newSigs) {
-            try {
-              const tx = await getTransactionWithRetry(connection, sig.signature);
-              
-              if (tx && tx.meta) {
-                intervalTransactions.push(tx);
-                
-                const events = parseTransferEvents(tx, mint) || [];
-                if (Array.isArray(events)) {
-                  for (const event of events) {
-                    event.signature = sig.signature;
-                    intervalEvents.push(event);
-                  }
-                }
-                
-                const parsed = parseTransaction(tx, mint);
-                if (parsed.mintEvent && parsed.mintAmount >= mintThreshold) {
-                  alerts.push({
-                    timestamp: formatTime(),
-                    type: 'mint_event',
-                    amount: parsed.mintAmount,
-                    signature: sig.signature,
-                    explanation: `Mint event: ${parsed.mintAmount.toLocaleString()}`
-                  });
-                }
-
-                if (parsed.transfer && parsed.transferAmount >= transferThreshold) {
-                  alerts.push({
-                    timestamp: formatTime(),
-                    type: 'large_transfer',
-                    amount: parsed.transferAmount,
-                    signature: sig.signature,
-                    explanation: `Large transfer: ${parsed.transferAmount.toLocaleString()}`
-                  });
-                }
-              }
-            } catch (e) {
-              partial = true;
-              continue;
+      if (change > 0) {
+        // Received tokens - find who sent (look for negative change)
+        let source = null;
+        let bestMatch = Infinity;
+        for (const [otherKey, otherPre] of preMap.entries()) {
+          if (otherKey === accountKey) continue;
+          const otherPost = postMap.get(otherKey) || { amount: 0 };
+          const otherChange = otherPost.amount - otherPre.amount;
+          if (otherChange < -0.000001) {
+            const diff = Math.abs(Math.abs(otherChange) - change);
+            if (diff < bestMatch && diff < change * 0.1) {
+              bestMatch = diff;
+              source = otherPre.owner || otherPost.owner || otherKey;
             }
           }
-
-          lastSignature = newestSig;
-        }
-      } catch (e) {
-        partial = true;
-      }
-
-      // Compute interval metrics
-      // Ensure intervalEvents is an array
-      const eventsArray = Array.isArray(intervalEvents) ? intervalEvents : [];
-      const currentMetrics = computeIntervalMetrics(eventsArray);
-      if (currentMetrics && typeof currentMetrics === 'object') {
-        intervalMetrics.push(currentMetrics);
-      }
-
-      // Update baseline after 3 intervals
-      if (intervalMetrics.length >= 3) {
-        baseline = computeBaseline(intervalMetrics, 3);
-      }
-
-      // Compute wallet stats and roles
-      const walletStats = computeWalletStats(intervalEvents);
-      const currentRoles = classifyWalletRoles(walletStats, topTokenAccounts);
-
-      // Detect behavioral drift
-      if (baseline) {
-        const driftAlerts = detectDrift(currentMetrics, baseline, strict);
-        for (const alert of driftAlerts) {
-          const confidence = calculateSignalConfidence(
-            baseline.intervals_observed,
-            currentMetrics.transfers_per_interval,
-            baseline.transfers_per_interval
-          );
-          const baselineStatus = baseline.intervals_observed >= 3 ? 'established' : 'forming';
-          
-          alerts.push({
-            timestamp: formatTime(),
-            type: 'behavior_drift',
-            drift_type: alert.type,
-            explanation: alert.explanation,
-            baseline_status: baselineStatus,
-            confidence: confidence
-          });
-        }
-      }
-
-      // Detect role changes
-      const roleChangeAlerts = detectRoleChanges(currentRoles, previousRoles, topTokenAccounts);
-      for (const alert of roleChangeAlerts) {
-        alerts.push({
-          timestamp: formatTime(),
-          type: 'role_change',
-          wallet: alert.wallet,
-          old_role: alert.old_role,
-          new_role: alert.new_role,
-          explanation: `${alert.wallet} changed from ${alert.old_role} to ${alert.new_role}`
-        });
-      }
-
-      // Detect dormant wallet activation
-      const dormantThreshold = strict ? transferThreshold * 0.5 : transferThreshold;
-      const dormantAlerts = detectDormantActivation(intervalEvents, activeWallets, dormantThreshold);
-      for (const alert of dormantAlerts) {
-        alerts.push({
-          timestamp: formatTime(),
-          type: 'dormant_activation',
-          wallet: alert.wallet,
-          amount: alert.amount,
-          explanation: `Dormant wallet ${alert.wallet} activated with ${alert.amount.toFixed(2)}`
-        });
-      }
-
-      // Detect structural alerts
-      const dominantThreshold = strict ? 0.5 : 0.6;
-      const structuralAlerts = detectStructuralAlerts(
-        currentMetrics,
-        baseline,
-        intervalTransactions,
-        authorityChangedThisInterval,
-        dominantThreshold
-      );
-      for (const alert of structuralAlerts) {
-        if (alert.type === 'first_dex_interaction' && firstDEXDetected) {
-          continue;
-        }
-        if (alert.type === 'first_dex_interaction') {
-          firstDEXDetected = true;
         }
         
-        const jsonAlert = {
-          timestamp: formatTime(),
-          type: alert.type,
-          explanation: alert.explanation
-        };
-        if (alert.dex_programs) jsonAlert.dex_programs = alert.dex_programs;
-        if (alert.share !== undefined) jsonAlert.share = alert.share;
-        alerts.push(jsonAlert);
-      }
-
-      // Update active wallets
-      for (const event of intervalEvents) {
-        if (event.source !== 'unknown') activeWallets.add(event.source);
-        if (event.destination !== 'unknown') activeWallets.add(event.destination);
-      }
-
-      // Update previous roles
-      previousRoles = new Map(currentRoles);
-
-      // Calculate total volume for interval
-      let totalVolume = 0;
-      for (const event of intervalEvents) {
-        totalVolume += event.amount || 0;
-      }
-
-      const endedAt = Date.now();
-      const duration_ms = endedAt - startedAt;
-
-      // Build roles summary
-      const rolesSummary = [];
-      for (const [address, role] of currentRoles.entries()) {
-        const stats = walletStats.get(address);
-        if (stats) {
-          rolesSummary.push({
-            wallet: address,
-            role: role,
-            volume: stats.total_volume,
-            net_flow: stats.net_flow,
-            counterparties: stats.unique_counterparties
-          });
+        events.push({
+          type: 'transfer',
+          amount: change,
+          source: source || 'unknown',
+          destination: owner,
+          timestamp: tx.blockTime
+        });
+      } else if (change < 0) {
+        // Sent tokens - find who received (look for positive change)
+        let destination = null;
+        let bestMatch = Infinity;
+        for (const [otherKey, otherPre] of preMap.entries()) {
+          if (otherKey === accountKey) continue;
+          const otherPost = postMap.get(otherKey) || { amount: 0 };
+          const otherChange = otherPost.amount - otherPre.amount;
+          if (otherChange > 0.000001) {
+            const diff = Math.abs(Math.abs(change) - otherChange);
+            if (diff < bestMatch && diff < Math.abs(change) * 0.1) {
+              bestMatch = diff;
+              destination = otherPost.owner || otherPre.owner || otherKey;
+            }
+          }
         }
-      }
-      rolesSummary.sort((a, b) => b.volume - a.volume);
-
-      const result = {
-        success: true,
-        checkCount,
-        timestamp: formatTime(),
-        mint,
-        tokenName,
-        supply: {
-          display: supplyDisplay,
-          raw: supplyRaw,
-          decimals: mintInfo.decimals
-        },
-        authorities: {
-          mint_authority: mintInfo.mintAuthority ? mintInfo.mintAuthority.toString() : null,
-          freeze_authority: mintInfo.freezeAuthority ? mintInfo.freezeAuthority.toString() : null
-        },
-        currentMetrics,
-        baseline: baseline ? {
-          transfers_per_interval: baseline.transfers_per_interval,
-          avg_transfer_size: baseline.avg_transfer_size,
-          unique_wallets_per_interval: baseline.unique_wallets_per_interval,
-          dominant_wallet_share: baseline.dominant_wallet_share,
-          intervals_observed: baseline.intervals_observed,
-          status: baseline.intervals_observed >= 3 ? 'established' : 'forming'
-        } : null,
-        intervalEvents: {
-          transfers: intervalEvents.filter(e => e.type === 'transfer').length,
-          mints: intervalEvents.filter(e => e.type === 'mint').length,
-          total: intervalEvents.length,
-          totalVolume,
-          uniqueWallets: currentMetrics.unique_wallets_per_interval
-        },
-        rolesSummary,
-        alerts,
-        startedAt,
-        endedAt,
-        duration_ms,
-        rpcErrors,
-        partial
-      };
-
-      // Call the onInterval callback if provided
-      if (callbacks.onInterval) {
-        callbacks.onInterval(result);
-      }
-
-      return result;
-
-    } catch (e) {
-      const errorMsg = e.message || String(e);
-      const isNetworkError = errorMsg.includes('fetch failed') || 
-                            errorMsg.includes('ECONNREFUSED') ||
-                            errorMsg.includes('ETIMEDOUT') ||
-                            errorMsg.includes('ENOTFOUND') ||
-                            errorMsg.includes('network') ||
-                            errorMsg.includes('timeout') ||
-                            errorMsg.includes('failed to get info');
-      
-      rpcErrors++;
-      
-      if (callbacks.onError) {
-        callbacks.onError({
-          error: errorMsg,
-          isNetworkError,
-          rpcErrors
+        
+        events.push({
+          type: 'transfer',
+          amount: Math.abs(change),
+          source: owner,
+          destination: destination || 'unknown',
+          timestamp: tx.blockTime
         });
       }
-
-      return {
-        success: false,
-        error: errorMsg,
-        isNetworkError,
-        rpcErrors,
-        duration_ms: Date.now() - startedAt
-      };
     }
   }
 
-  return {
-    runInterval,
-    getState: () => ({
-      mint,
-      tokenName,
-      interval,
-      strict,
-      rpcUrl,
-      checkCount,
-      intervalMetrics,
-      baseline,
-      previousRoles,
-      activeWallets,
-      topTokenAccounts,
-      firstDEXDetected
-    })
-  };
+  // Method 2: Parse instructions (backup method)
+  // Now supports both SPL Token and Token-2022
+  const instructions = (tx.transaction?.message?.instructions) || [];
+  for (const ix of instructions) {
+    const isSPLToken = ix.program === 'spl-token' || 
+                      ix.programId === splTokenProgramId;
+    const isToken2022 = ix.program === 'token-2022' || 
+                        ix.programId === token2022ProgramId;
+    
+    // Accept both SPL Token and Token-2022 instructions
+    if (isSPLToken || isToken2022) {
+      if (ix.parsed) {
+        if (ix.parsed.type === 'transfer' || ix.parsed.type === 'transferChecked') {
+          const info = ix.parsed.info;
+          if (info) {
+            let involvesOurMint = false;
+            
+            if (info.mint === mintStr) {
+              involvesOurMint = true;
+            } else {
+              const sourceInMap = info.source && (preMap.has(info.source) || postMap.has(info.source));
+              const destInMap = info.destination && (preMap.has(info.destination) || postMap.has(info.destination));
+              if (sourceInMap || destInMap) {
+                involvesOurMint = true;
+              }
+            }
+            
+            if (involvesOurMint) {
+              const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
+              if (amount > 0) {
+                events.push({
+                  type: 'transfer',
+                  amount,
+                  source: info.source || 'unknown',
+                  destination: info.destination || 'unknown',
+                  timestamp: tx.blockTime
+                });
+              }
+            }
+          }
+        }
+        if (ix.parsed.type === 'mintTo' || ix.parsed.type === 'mintToChecked') {
+          const info = ix.parsed.info;
+          if (info && info.mint === mintStr) {
+            const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
+            if (amount > 0) {
+              events.push({
+                type: 'mint',
+                amount,
+                destination: info.account || info.destination || 'unknown',
+                timestamp: tx.blockTime
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Check inner instructions
+  // Now supports both SPL Token and Token-2022
+  const innerInstructions = tx.meta.innerInstructions || [];
+  for (const inner of innerInstructions) {
+    const innerIxs = inner.instructions || [];
+    for (const ix of innerIxs) {
+      const isSPLToken = ix.program === 'spl-token' || 
+                        ix.programId === splTokenProgramId;
+      const isToken2022 = ix.program === 'token-2022' || 
+                          ix.programId === token2022ProgramId;
+      
+      // Accept both SPL Token and Token-2022 instructions
+      if (isSPLToken || isToken2022) {
+        if (ix.parsed) {
+          if (ix.parsed.type === 'transfer' || ix.parsed.type === 'transferChecked') {
+            const info = ix.parsed.info;
+            if (info) {
+              let involvesOurMint = false;
+              if (info.mint === mintStr) {
+                involvesOurMint = true;
+              } else {
+                const sourceInMap = info.source && (preMap.has(info.source) || postMap.has(info.source));
+                const destInMap = info.destination && (preMap.has(info.destination) || postMap.has(info.destination));
+                if (sourceInMap || destInMap) {
+                  involvesOurMint = true;
+                }
+              }
+              
+              if (involvesOurMint) {
+                const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
+                if (amount > 0) {
+                  events.push({
+                    type: 'transfer',
+                    amount,
+                    source: info.source || 'unknown',
+                    destination: info.destination || 'unknown',
+                    timestamp: tx.blockTime
+                  });
+                }
+              }
+            }
+          }
+          if (ix.parsed.type === 'mintTo' || ix.parsed.type === 'mintToChecked') {
+            const info = ix.parsed.info;
+            if (info && info.mint === mintStr) {
+              const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
+              if (amount > 0) {
+                events.push({
+                  type: 'mint',
+                  amount,
+                  destination: info.account || info.destination || 'unknown',
+                  timestamp: tx.blockTime
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Method 3: Fallback - check all transfer instructions if mint found in balances
+  // Now supports both SPL Token and Token-2022
+  const knownTokenAccounts = new Set([...preMap.keys(), ...postMap.keys()]);
+  
+  if (knownTokenAccounts.size > 0 || preBalances.some(b => b.mint === mintStr) || postBalances.some(b => b.mint === mintStr)) {
+    const allInstructions = [
+      ...(tx.transaction?.message?.instructions || []),
+      ...(tx.meta?.innerInstructions || []).flatMap(inner => inner.instructions || [])
+    ];
+    
+    const allTokenAccountsInTx = new Set();
+    for (const pre of preBalances) {
+      if (pre.owner) allTokenAccountsInTx.add(pre.owner);
+    }
+    for (const post of postBalances) {
+      if (post.owner) allTokenAccountsInTx.add(post.owner);
+    }
+    
+    for (const ix of allInstructions) {
+      // Accept both SPL Token and Token-2022
+      if (ix.program === 'spl-token' || ix.program === 'token-2022' || 
+          ix.programId === splTokenProgramId || ix.programId === token2022ProgramId) {
+        if (ix.parsed && (ix.parsed.type === 'transfer' || ix.parsed.type === 'transferChecked')) {
+          const info = ix.parsed.info;
+          if (info) {
+            const sourceInMap = info.source && (knownTokenAccounts.has(info.source) || allTokenAccountsInTx.has(info.source));
+            const destInMap = info.destination && (knownTokenAccounts.has(info.destination) || allTokenAccountsInTx.has(info.destination));
+            const mintMatches = info.mint === mintStr;
+            
+            if (sourceInMap || destInMap || mintMatches) {
+              const amount = info.tokenAmount?.uiAmount || parseFloat(info.amount || 0) / 1e9 || 0;
+              if (amount > 0) {
+                // Check if we already have this event (avoid duplicates)
+                const alreadyExists = events.some(e => 
+                  e.type === 'transfer' &&
+                  Math.abs(e.amount - amount) < 0.000001 &&
+                  e.source === (info.source || 'unknown') &&
+                  e.destination === (info.destination || 'unknown')
+                );
+                
+                if (!alreadyExists) {
+                  events.push({
+                    type: 'transfer',
+                    amount,
+                    source: info.source || 'unknown',
+                    destination: info.destination || 'unknown',
+                    timestamp: tx.blockTime
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Deduplicate events
+  const uniqueEvents = [];
+  const seen = new Set();
+  for (const event of events) {
+    const key = `${event.type}-${event.amount.toFixed(6)}-${event.source}-${event.destination}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      uniqueEvents.push(event);
+    }
+  }
+
+  return uniqueEvents;
 }
 
 module.exports = {
-  createWatchSession,
-  parseTransaction,
-  formatTime
+  fetchTransaction,
+  parseTransferEvents
 };
